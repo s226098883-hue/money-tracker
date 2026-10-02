@@ -33,7 +33,7 @@ self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET' || new URL(request.url).origin !== self.location.origin) return;
   event.respondWith(
-    fetch(request)
+    fetch(request, { cache: 'no-cache' }) // always check GitHub for a newer version first
       .then((response) => {
         if (response.ok) {
           const copy = response.clone();
