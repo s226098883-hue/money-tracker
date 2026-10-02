@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>MoneyTrack</title>
+  <meta name="description" content="Track what you spend and save each day, and who you owe or who owes you.">
+  <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="MoneyTrack">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    // Apply the saved light/dark choice before the page paints (avoids a flash).
+    try {
+      var s = JSON.parse(localStorage.getItem('moneytrack.v1') || '{}').settings || {};
+      if (s.theme === 'light' || s.theme === 'dark') document.documentElement.setAttribute('data-theme', s.theme);
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="topbar-text">
+        <p class="eyebrow" id="eyebrow" hidden></p>
+        <h1 id="title">Today</h1>
+      </div>
+      <div id="headerAction"></div>
+    </header>
+    <main id="view" tabindex="-1"></main>
+  </div>
+
+  <nav class="tabbar" aria-label="Main">
+    <a href="#today" data-tab="today">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V20a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9.5"/></svg>
+      <span>Today</span>
+    </a>
+    <a href="#activity" data-tab="activity">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>
+      <span>Activity</span>
+    </a>
+    <a href="#debts" data-tab="debts">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7"/><path d="M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/></svg>
+      <span>Debts</span>
+      <b class="tab-badge" id="debtsBadge" hidden></b>
+    </a>
+    <a href="#insights" data-tab="insights">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18"/><path d="M6 17v-6M12 17V5M18 17v-9"/></svg>
+      <span>Insights</span>
+    </a>
+    <a href="#settings" data-tab="settings">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+      <span>Settings</span>
+    </a>
+  </nav>
+
+  <dialog id="sheet" class="sheet" aria-labelledby="sheetTitle"></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <noscript><p style="padding:16px">MoneyTrack needs JavaScript turned on.</p></noscript>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
