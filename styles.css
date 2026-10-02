@@ -433,6 +433,24 @@ dialog.sheet::backdrop { background: rgba(0, 0, 0, 0.4); }
 .goal-list-btn .kv-value { padding: 0; }
 .tag { flex: none; font-size: 12px; font-weight: 600; color: var(--accent-text); background: color-mix(in srgb, var(--saved) 16%, transparent); border-radius: 999px; padding: 3px 9px; }
 
+/* ---------- Weekly target + Thirukkural ---------- */
+.goal-math { font-size: 13px; color: var(--text-2); margin-top: 12px; }
+.goal-math + .goal-status { margin-top: 6px; }
+.week-chip { background: color-mix(in srgb, var(--owed) 14%, transparent); color: var(--text); font-weight: 500; }
+.week-chip .ic { color: var(--owed); }
+.quote-card {
+  text-align: center; padding: 22px 18px 18px;
+  background: color-mix(in srgb, var(--saved) 10%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--saved) 22%, transparent);
+}
+.quote-text {
+  font-family: "Tamil Sangam MN", "Noto Sans Tamil", "Latha", "Nirmala UI", system-ui, sans-serif;
+  font-size: 18px; font-weight: 600; line-height: 1.75; color: var(--text); overflow-wrap: anywhere;
+}
+.quote-text::before { content: "“"; display: block; font-size: 34px; line-height: 0.6; color: var(--saved); margin-bottom: 6px; font-family: Georgia, serif; }
+.quote-source { margin-top: 10px; font-size: 13px; color: var(--text-2); }
+@media (max-width: 360px) { .quote-text { font-size: 16px; } }
+
 /* ---------- GitHub sync ---------- */
 .sync-card .btn-row { margin-top: 14px; }
 .sync-intro p { font-size: 15px; color: var(--text); }

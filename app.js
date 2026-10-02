@@ -143,8 +143,10 @@ function goalProgress(g) {
   const remaining = Math.max(0, round2(g.target - saved));
   const pct = g.target > 0 ? Math.min(1, saved / g.target) : 0;
   const daysLeft = daysBetween(t, g.dueDate);
-  const weeksLeft = Math.max(1, Math.ceil((daysLeft + 1) / 7));
-  const perWeek = remaining / weeksLeft;
+  // Per week = money still needed ÷ weeks left (today counts). It changes every time you save and as the days pass.
+  const daysToSave = Math.max(0, daysLeft + 1);
+  const weeksLeft = daysToSave / 7;
+  const perWeek = daysToSave >= 7 ? remaining / weeksLeft : remaining;
   const totalDays = Math.max(1, daysBetween(g.startDate, g.dueDate));
   const elapsed = Math.min(totalDays, Math.max(0, daysBetween(g.startDate, t)));
   const expected = g.target * (elapsed / totalDays);
@@ -160,8 +162,61 @@ function goalProgress(g) {
   else if (daysLeft === 1) when = '1 day left';
   else if (daysLeft === 0) when = 'Due today';
   else when = 'Date passed';
-  return { g, saved, remaining, pct, daysLeft, perWeek, reached, status, when };
+  return { g, saved, remaining, pct, daysLeft, daysToSave, weeksLeft, perWeek, reached, status, when };
 }
+
+/** "13 weeks", "12.4 weeks", "1 week". */
+function weeksText(w) {
+  const r = Math.round(w * 10) / 10;
+  const n = Number.isInteger(r) ? String(r) : r.toFixed(1);
+  return `${n} week${r === 1 ? '' : 's'}`;
+}
+
+/**
+ * This week's savings target (Monday to Sunday).
+ * Following a goal, it's worked out on Monday: money still needed then ÷ weeks left then — so it stays
+ * the same all week, and saving extra this week lowers next week's target.
+ */
+function weekPlan() {
+  const wt = state.settings.weeklyTarget || { mode: 'goal', amount: 0 };
+  if (wt.mode === 'off') return null;
+  const t = todayISO();
+  const wk = weekStart(t);
+  const we = addDays(wk, 6);
+  const dayIndex = daysBetween(wk, t); // Monday = 0
+  const daysLeft = 7 - dayIndex; // including today
+  let target;
+  let saved;
+  let goal = null;
+  let basis = null;
+  if (wt.mode === 'fixed') {
+    if (!(wt.amount > 0)) return { empty: true, mode: 'fixed' };
+    target = wt.amount;
+    saved = savedBetween(wk, we);
+  } else {
+    goal = goalsInOrder()[0] || null;
+    if (!goal) return { empty: true, mode: 'goal' };
+    const linked = savings().filter((e) => e.goalId === goal.id);
+    const before = round2(goal.alreadySaved + sumSaved(linked.filter((e) => e.date < wk)));
+    const remStart = Math.max(0, round2(goal.target - before));
+    const daysFromMonday = daysBetween(wk, goal.dueDate) + 1;
+    target = daysFromMonday <= 7 ? remStart : round2((remStart * 7) / daysFromMonday);
+    saved = sumSaved(linked.filter((e) => e.date >= wk && e.date <= we));
+    basis = { remStart, weeks: Math.max(0, daysFromMonday) / 7, goalDone: remStart <= 0 };
+  }
+  const remaining = Math.max(0, round2(target - saved));
+  const pct = target > 0 ? Math.min(1, saved / target) : 1;
+  const reached = remaining <= 0;
+  const perDay = remaining / daysLeft;
+  const expected = (target * dayIndex) / 7; // what you'd have saved by the start of today at an even pace
+  let status;
+  if (basis && basis.goalDone) status = { level: 'good', icon: ICON.check, text: `${goalName(goal)} is already reached — nothing needed` };
+  else if (reached) status = { level: 'good', icon: ICON.check, text: saved > target ? `Week target beaten by ${money(saved - target)} 🎉` : 'Week target reached — well done!' };
+  else if (saved + 0.005 >= expected) status = { level: 'good', icon: ICON.check, text: 'On track this week' };
+  else status = { level: 'behind', icon: ICON.clock, text: `Behind this week by ${money(expected - saved)}` };
+  return { mode: wt.mode, wk, we, dayIndex, daysLeft, target, saved, remaining, pct, reached, perDay, status, goal, basis };
+}
+
 
 // ---------- Save + re-render ----------
 
@@ -461,7 +516,8 @@ function goalsPanel() {
         <span><strong>Set a savings goal</strong><small>Choose a target and a date, then watch the bar fill up as you save. You can have more than one.</small></span>
       </div>
       <button class="btn btn-saved" data-action="new-goal">${ICON.plus}Set a goal</button>
-    </section>`;
+    </section>
+    ${weeklyPanel()}`;
   }
   const [main, ...others] = goalsInOrder();
   const p = goalProgress(main);
@@ -479,15 +535,67 @@ function goalsPanel() {
       ${textTile(`By ${shortDate(main.dueDate)}`, p.when)}
       ${p.reached || p.daysLeft < 0 ? '' : textTile('Per week', money(p.perWeek))}
     </div>
+    ${p.reached || p.daysLeft < 0 ? '' : `<p class="goal-math">${p.daysToSave >= 7
+    ? `${esc(money(p.remaining))} still needed ÷ ${esc(weeksText(p.weeksLeft))} left — updates every time you save`
+    : `${esc(money(p.remaining))} still needed in the last ${p.daysToSave} day${p.daysToSave === 1 ? '' : 's'}`}</p>`}
     <p class="goal-status ${p.status.level}">${p.status.icon}${esc(p.status.text)}</p>
     ${others.length ? '' : `<button class="link-btn add-goal-link" data-action="new-goal">${ICON.plus}Add another goal</button>`}
   </section>`;
-  if (!others.length) return big;
+  if (!others.length) return `${big}${weeklyPanel()}`;
   return `${big}
+    ${weeklyPanel()}
     <section class="card" aria-label="Other goals">
       ${cardHead('Other goals', '+ New goal', 'new-goal')}
       <div class="rows">${others.map(goalMiniRow).join('')}</div>
     </section>`;
+}
+
+/** 2nd panel: this week's target, laid out like the goal card. */
+function weeklyPanel() {
+  const w = weekPlan();
+  if (!w) return '';
+  if (w.empty) {
+    return `<section class="card goal-card" aria-label="Weekly target">
+      <div class="goal-empty">
+        <span class="emoji-badge owedToMe" aria-hidden="true">📅</span>
+        <span><strong>Set a weekly target</strong><small>${w.mode === 'goal'
+    ? 'Set a savings goal above and your weekly target is worked out for you — or choose your own amount.'
+    : 'Choose how much you want to save each week.'}</small></span>
+      </div>
+      <button class="btn btn-secondary" data-action="edit-week-target">${ICON.calendar}Set weekly target</button>
+    </section>`;
+  }
+  const range = `${fmtDate(w.wk, { weekday: 'short', day: 'numeric', month: 'short' })} – ${fmtDate(w.we, { weekday: 'short', day: 'numeric', month: 'short' })}`;
+  const daysText = w.daysLeft === 1 ? 'Today only' : `${w.daysLeft} days`;
+  let source;
+  if (w.mode === 'fixed') source = 'Your fixed weekly target · counts every saving this week';
+  else if (w.basis.goalDone) source = `Follows ${goalName(w.goal)}`;
+  else if (w.basis.weeks > 1) source = `From ${goalName(w.goal)}: ${money(w.basis.remStart)} still needed on Monday ÷ ${weeksText(w.basis.weeks)} left`;
+  else source = `From ${goalName(w.goal)}: the last ${money(w.basis.remStart)} is due this week`;
+  return `<section class="card goal-card week-card" aria-label="This week's target">
+    <div class="card-head"><h2>📅 This week's target</h2><button class="link-btn" data-action="edit-week-target">Edit</button></div>
+    <p class="auto-chip week-chip">${ICON.calendar}${esc(range)}</p>
+    <div class="goal-amounts"><span class="goal-saved">${esc(money(w.saved))}</span><span class="muted">saved of ${esc(money(w.target))}</span></div>
+    <div class="goal-progress">
+      ${goalBar(w, `week-${w.wk}`, "This week's progress")}
+      <span class="goal-pct">${Math.floor(w.pct * 100)}%</span>
+    </div>
+    <div class="goal-facts">
+      ${w.reached ? textTile('Target', money(w.target)) : textTile('Still needed', money(w.remaining))}
+      ${w.reached ? '' : textTile('Per day', money(w.perDay))}
+      ${textTile('Days left', daysText)}
+    </div>
+    <p class="goal-math">${esc(source)}</p>
+    <p class="goal-status ${w.status.level}">${w.status.icon}${esc(w.status.text)}</p>
+  </section>`;
+}
+
+/** Last panel: a line to keep going (Thirukkural 619). */
+function quoteCard() {
+  return `<section class="card quote-card" aria-label="Thirukkural 619">
+    <p class="quote-text" lang="ta">தெய்வத்தான் ஆகா தெனினும் முயற்சிதன்<br>மெய்வருத்தக் கூலி தரும்</p>
+    <p class="quote-source" lang="ta">— திருக்குறள் 619</p>
+  </section>`;
 }
 
 function goalMiniRow(g) {
@@ -598,6 +706,8 @@ function renderToday(view) {
         : '<p class="muted small" style="margin-top:12px">Nothing open right now.</p>'}
       <button class="btn btn-secondary" style="margin-top:14px" data-action="add-debt">${ICON.plus}Add debt or loan</button>
     </section>
+
+    ${quoteCard()}
     ${sync.isOn() ? '<button class="sync-line" data-sync-status data-action="goto" data-arg="settings"></button>' : ''}`;
 
   // Mon–Sun mini chart for this week.
@@ -880,6 +990,10 @@ function renderSettings(view) {
       <div class="card form-list">
         ${goalsInOrder().map((g) => `<button class="list-btn goal-list-btn" data-action="edit-goal" data-id="${esc(g.id)}"><span>${esc(goalName(g))}</span>${g.id === s.defaultGoalId ? '<span class="tag">New savings go here</span>' : `<span class="kv-value">${esc(money(g.target))}</span>`}</button>`).join('')}
         <button class="list-btn" data-action="new-goal">${state.goals.length ? 'Add another goal' : 'Set a savings goal'}</button>
+        <button class="list-btn goal-list-btn" data-action="edit-week-target"><span>Weekly target</span><span class="kv-value">${esc(
+    s.weeklyTarget.mode === 'off' ? 'Off'
+      : s.weeklyTarget.mode === 'fixed' ? `${money(s.weeklyTarget.amount)} a week`
+        : 'Follows your goal')}</span></button>
       </div>
       ${state.goals.length > 1 ? '<p class="footnote">To change which goal new savings go to, open a goal and turn on <b>New savings go here</b>.</p>' : ''}
     </section>
@@ -1196,6 +1310,71 @@ function goalSheet(id = null) {
       commit(g ? 'Goal updated' : form.auto.checked && state.goals.length > 1 ? `${goalName(goal)} added — new savings go here` : 'Goal set — good luck!');
     });
   });
+}
+
+// Weekly target
+function weekTargetSheet() {
+  const wt = state.settings.weeklyTarget || { mode: 'goal', amount: 0 };
+  const f = { mode: wt.mode, amount: wt.amount ? String(wt.amount) : '' };
+  openSheet((root) => {
+    const main = goalsInOrder()[0] || null;
+    const plan = main ? weekPlanFor('goal') : null;
+    root.innerHTML = `
+      ${sheetHead('Weekly target', { save: 'weekForm' })}
+      <form id="weekForm" class="sheet-body" novalidate autocomplete="off">
+        ${formSeg('mode', [['goal', 'Follow my goal'], ['fixed', 'My own amount'], ['off', 'Off']], f.mode, 'Weekly target')}
+        <div class="mode-goal" ${f.mode === 'goal' ? '' : 'hidden'}>
+          ${main
+    ? `<div class="card"><p>This week: <b>${esc(money(plan.target))}</b> for <b>${esc(goalName(main))}</b>.</p>
+              <p class="muted small" style="margin-top:6px">It's the money still needed for your goal on Monday, shared over the weeks left. It's worked out again every Monday — save extra one week and the next weeks need less. Savings linked to ${esc(goalName(main))} count toward it.</p></div>`
+    : `<div class="card"><p class="muted">You don't have a savings goal yet. Set one and your weekly target is worked out for you.</p>
+              <button type="button" class="btn btn-secondary" style="margin-top:12px" data-action="new-goal">${ICON.plus}Set a goal</button></div>`}
+        </div>
+        <div class="mode-fixed" ${f.mode === 'fixed' ? '' : 'hidden'}>
+          <h3 class="group-title" style="margin-bottom:8px">Save each week</h3>
+          ${amountField(f.amount, false)}
+          <p class="footnote">Every saving you add from Monday to Sunday counts toward it.</p>
+        </div>
+        <div class="mode-off" ${f.mode === 'off' ? '' : 'hidden'}>
+          <p class="footnote">The weekly panel is hidden from Today. Turn it back on here any time.</p>
+        </div>
+      </form>`;
+    const form = $('#weekForm', root);
+    bindAmount(root);
+    form.addEventListener('input', () => { f.amount = $('#amt', root).value; });
+    bindFormSeg(root, 'mode', (v) => {
+      f.mode = v;
+      $('.mode-goal', root).hidden = v !== 'goal';
+      $('.mode-fixed', root).hidden = v !== 'fixed';
+      $('.mode-off', root).hidden = v !== 'off';
+    });
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      let amount = state.settings.weeklyTarget ? state.settings.weeklyTarget.amount : 0;
+      if (f.mode === 'fixed') {
+        amount = parseAmount($('#amt', root).value);
+        if (!amount) {
+          showError(root, 'amtError', 'Enter how much you want to save each week.');
+          $('#amt', root).focus();
+          return;
+        }
+      }
+      state.settings.weeklyTarget = { mode: f.mode, amount: amount || 0 };
+      closeSheet();
+      commit(f.mode === 'off' ? 'Weekly panel hidden' : 'Weekly target saved');
+    });
+  });
+}
+
+/** Works out the weekly plan for a given mode (used to preview it in the form). */
+function weekPlanFor(mode) {
+  const saved = state.settings.weeklyTarget;
+  state.settings.weeklyTarget = { ...(saved || {}), mode };
+  try {
+    return weekPlan();
+  } finally {
+    state.settings.weeklyTarget = saved;
+  }
 }
 
 // Debt / loan form
@@ -1597,7 +1776,11 @@ document.addEventListener('click', (ev) => {
       }
       break;
     case 'new-goal':
+      if (sheet.open) closeAllSheets();
       goalSheet();
+      break;
+    case 'edit-week-target':
+      weekTargetSheet();
       break;
     case 'edit-goal':
       goalSheet(id);

@@ -1,7 +1,7 @@
 // Data, saving, and small helpers. Everything is stored in this browser (localStorage).
 
 export const STORAGE_KEY = 'moneytrack.v1';
-export const APP_VERSION = '1.2.0';
+export const APP_VERSION = '1.3.0';
 
 export const CATEGORIES = [
   { id: 'food', name: 'Food & Drink', emoji: '🍔' },
@@ -33,11 +33,12 @@ export const SCHEMA = 2;
 
 // Settings sync one by one: each remembers when it was last changed (stamps), so changing the theme on one
 // device never undoes a goal choice made on another — and a brand-new device's defaults never win.
-const SETTING_KEYS = ['currency', 'remindDays', 'theme', 'defaultGoalId'];
+const SETTING_KEYS = ['currency', 'remindDays', 'theme', 'defaultGoalId', 'weeklyTarget'];
 
 function defaultSettings() {
   // defaultGoalId: the goal that new savings count toward automatically (null = none).
-  return { currency: 'AUD', remindDays: 7, theme: 'system', defaultGoalId: null, stamps: {} };
+  // weeklyTarget: 'goal' = worked out every Monday from your main goal, 'fixed' = your own amount, 'off' = hidden.
+  return { currency: 'AUD', remindDays: 7, theme: 'system', defaultGoalId: null, weeklyTarget: { mode: 'goal', amount: 0 }, stamps: {} };
 }
 
 export function emptyState() {
@@ -151,6 +152,10 @@ export function normalise(data) {
     currency: CURRENCIES.includes(s.currency) || /^[A-Z]{3}$/.test(s.currency || '') ? s.currency : base.settings.currency,
     remindDays: [1, 3, 7, 14, 30].includes(Number(s.remindDays)) ? Number(s.remindDays) : 7,
     theme: ['system', 'light', 'dark'].includes(s.theme) ? s.theme : 'system',
+    weeklyTarget: {
+      mode: isObj(s.weeklyTarget) && ['goal', 'fixed', 'off'].includes(s.weeklyTarget.mode) ? s.weeklyTarget.mode : 'goal',
+      amount: isObj(s.weeklyTarget) ? round2(Math.abs(num(s.weeklyTarget.amount))) : 0,
+    },
     stamps,
   };
   delete settings.updatedAt;

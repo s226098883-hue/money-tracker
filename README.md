@@ -4,6 +4,7 @@ A simple savings and debts tracker that runs in your browser and can be added to
 
 - **Today** – your savings goals with progress bars, what you saved this week, and who you need to pay or who owes you. The **+** button adds a saving.
 - **Savings goals** – have as many as you like. Pick one with **New savings go here** and every saving you add counts toward it automatically (you can choose a different goal, or none, when you add a saving).
+- **This week's target** – the second panel on Today: how much to save this week, how much is still needed, per day and days left. It follows your main goal (money still needed ÷ weeks left, worked out every Monday) or a fixed amount you choose.
 - **Savings** – every amount you put aside, grouped by day, with search
 - **Debts** – loans and people you owe, and people who owe you, with payments and due dates
 - **Insights** – savings for the last 7 or 30 days, plus week-by-week and month-by-month savings for the last 6 months
