@@ -19,7 +19,7 @@ export function newKeyURL(owner = siteOwner()) {
   const params = new URLSearchParams({
     name: 'MoneyTrack sync',
     description: 'Lets the MoneyTrack app save your data to your private money-tracker-data repository.',
-    expires_in: '366',
+    expires_in: '364', // GitHub allows at most 365 days; 364 fills in the date reliably
     contents: 'write',
   });
   if (owner) params.set('target_name', owner);
