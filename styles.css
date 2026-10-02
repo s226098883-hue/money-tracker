@@ -33,6 +33,7 @@
   --critical: #b52f2f;
   --critical-soft: rgba(208, 59, 59, 0.10);
   --warning: #8a5a00;
+  --warning-soft: rgba(250, 178, 25, 0.16);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
   --radius: 18px;
   --tabbar-h: 58px;
@@ -64,6 +65,7 @@
     --critical: #e66767;
     --critical-soft: rgba(230, 103, 103, 0.16);
     --warning: #fab219;
+    --warning-soft: rgba(250, 178, 25, 0.14);
     --shadow: none;
   }
 }
@@ -92,6 +94,7 @@
   --critical: #e66767;
   --critical-soft: rgba(230, 103, 103, 0.16);
   --warning: #fab219;
+  --warning-soft: rgba(250, 178, 25, 0.14);
   --shadow: none;
 }
 
@@ -374,6 +377,46 @@ dialog.sheet::backdrop { background: rgba(0, 0, 0, 0.4); }
 .hbar-value { font-size: 13px; color: var(--text-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .empty-chart { color: var(--text-2); text-align: center; padding: 28px 8px; font-size: 14px; }
 
+/* ---------- Back button ---------- */
+.back-btn {
+  display: inline-flex; align-items: center; gap: 2px; margin: 0 0 4px -8px; padding: 6px 8px 6px 2px;
+  border: 0; background: none; color: var(--accent-text); font-size: 16px; font-weight: 500; border-radius: 10px;
+}
+.back-btn .ic { width: 22px; height: 22px; }
+.back-btn:active { background: var(--hover); }
+
+/* ---------- Savings goal ---------- */
+.goal-card .card-head h2 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.goal-amounts { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+.goal-saved { font-size: 32px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; }
+.goal-progress { display: flex; align-items: center; gap: 10px; margin: 12px 0 14px; }
+.goal-bar { flex: 1; height: 14px; border-radius: 7px; overflow: hidden; background: var(--fill-strong); background: color-mix(in srgb, var(--saved) 18%, transparent); }
+.goal-bar > span { display: block; height: 100%; min-width: 0; border-radius: 7px; background: var(--saved); transition: width 0.9s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.goal-pct { font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; min-width: 42px; text-align: right; }
+.goal-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 12px; }
+.goal-facts .tile-value { font-size: 17px; }
+.goal-status { display: flex; align-items: center; gap: 6px; margin-top: 14px; font-size: 14px; font-weight: 600; }
+.goal-status .ic { width: 18px; height: 18px; }
+.goal-status.good { color: var(--accent-text); }
+.goal-status.behind { color: var(--warning); }
+.goal-status.overdue { color: var(--critical); }
+.goal-empty { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.goal-empty .emoji-badge { width: 44px; height: 44px; font-size: 22px; }
+.goal-empty strong { display: block; font-size: 17px; }
+.goal-empty small { display: block; color: var(--text-2); font-size: 14px; }
+
+/* ---------- Week chart, debt lists, section titles ---------- */
+.week-chart { margin-top: 12px; }
+.mini-title { font-size: 12px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.04em; margin: 16px 0 2px; }
+.section-title { font-size: 20px; font-weight: 700; margin: 8px 4px -4px; }
+.chart-sub { font-size: 13px; color: var(--text-2); margin: -6px 0 10px; }
+.alert-banner.soon { background: var(--warning-soft); }
+.alert-banner.soon .lead { color: var(--warning); }
+
+@media (prefers-reduced-motion: reduce) {
+  .goal-bar > span { transition: none; }
+}
+
 /* ---------- Tab bar ---------- */
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
@@ -413,7 +456,9 @@ dialog.sheet::backdrop { background: rgba(0, 0, 0, 0.4); }
 }
 
 @media (max-width: 360px) {
-  .tile.big .tile-value { font-size: 26px; }
+  .btn-row .btn { padding: 0 10px; }
+  .btn-row .btn .ic { display: none; }
+  .tile.big .tile-value { font-size: 22px; }
   .hero-value { font-size: 34px; }
   .cat-emoji { width: 42px; height: 42px; font-size: 20px; }
 }

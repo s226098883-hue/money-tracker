@@ -1,6 +1,6 @@
 // Lets MoneyTrack open without internet. Online it always fetches the newest version first,
 // so updates you push to GitHub show up the next time the app is opened.
-const CACHE = 'moneytrack-v1';
+const CACHE = 'moneytrack-v2';
 const APP_FILES = [
   './',
   './index.html',

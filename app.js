@@ -1,21 +1,20 @@
 // MoneyTrack — main app: screens, forms and actions.
 import {
-  STORAGE_KEY, APP_VERSION, CATEGORIES, CAT, SAVED_EMOJI, CURRENCIES,
+  STORAGE_KEY, APP_VERSION, SAVED_EMOJI, CURRENCIES,
   loadState, saveState, normalise, askForPersistentStorage, sampleState, storageWorks,
-  uid, esc, sanitizeAmount, parseAmount,
-  todayISO, fromISO, addDays, daysBetween, monthOf, addMonths,
+  uid, esc, round2, sanitizeAmount, parseAmount,
+  todayISO, fromISO, addDays, daysBetween, monthOf, addMonths, weekStart,
   paidOf, remainingOf, progressOf, nextDue, dueInfo,
 } from './store.js';
-import { columnChart, chartTable, legend, hBars } from './charts.js';
+import { columnChart, chartTable } from './charts.js';
 
 let state = loadState();
 
 const ui = {
-  activityFilter: 'all',
-  activitySearch: '',
+  search: '',
   debtDirection: 'iOwe',
   insightsRange: '7d',
-  tableView: { trend: false, cats: false },
+  tableView: { daily: false, weekly: false, monthly: false },
   showSettled: false,
 };
 
@@ -24,11 +23,12 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
 const ICON = {
   plus: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
-  minus: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>',
+  back: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>',
   chevron: '<svg class="ic chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
   alert: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4M12 17.5v.01"/></svg>',
   calendar: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></svg>',
   check: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>',
+  clock: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
   trash: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13M9 7V4h6v3"/></svg>',
 };
 
@@ -38,11 +38,17 @@ const fmtCache = new Map();
 function nf(name, opts) {
   const key = `${state.settings.currency}|${name}`;
   if (!fmtCache.has(key)) {
+    const base = { style: 'currency', currency: state.settings.currency, ...opts };
     let f;
     try {
-      f = new Intl.NumberFormat(undefined, { style: 'currency', currency: state.settings.currency, ...opts });
+      // "narrowSymbol" shows $ instead of A$ for Australian dollars.
+      f = new Intl.NumberFormat(undefined, { ...base, currencyDisplay: 'narrowSymbol' });
     } catch {
-      f = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'AUD', ...opts });
+      try {
+        f = new Intl.NumberFormat(undefined, base);
+      } catch {
+        f = new Intl.NumberFormat(undefined, { ...base, currency: 'AUD' });
+      }
     }
     fmtCache.set(key, f);
   }
@@ -51,6 +57,7 @@ function nf(name, opts) {
 const money = (v) => nf('full', {}).format(v);
 const moneyRound = (v) => nf('round', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(v);
 const moneyCompact = (v) => nf('compact', { notation: 'compact', maximumFractionDigits: 1 }).format(v);
+const formatAxis = (v) => (v >= 1000 ? moneyCompact(v) : Number.isInteger(v) ? moneyRound(v) : money(v));
 function currencySymbol() {
   const part = nf('full', {}).formatToParts(0).find((p) => p.type === 'currency');
   return part ? part.value : '$';
@@ -68,17 +75,31 @@ function dayTitle(iso) {
 const monthName = (ym, style = 'short') => new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)) - 1, 1)
   .toLocaleDateString(undefined, style === 'long' ? { month: 'long', year: 'numeric' } : { month: 'short' });
 
-const sumKind = (list, kind) => list.reduce((s, e) => (e.kind === kind ? s + e.amount : s), 0);
+// ---------- Data helpers ----------
+
+/** Only savings are tracked now (older spending entries stay in the data but are not shown). */
+const savings = () => state.entries.filter((e) => e.kind === 'saved');
+const sumSaved = (list) => round2(list.reduce((s, e) => s + e.amount, 0));
+const savedBetween = (from, to) => sumSaved(savings().filter((e) => e.date >= from && e.date <= to));
 const findDebt = (id) => state.debts.find((d) => d.id === id);
 const debtEmoji = (d) => (d.kind === 'loan' ? '🏦' : '👤');
 const directionColor = (dir) => (dir === 'iOwe' ? 'var(--owe)' : 'var(--owed)');
 
-function sortedEntries() {
-  return [...state.entries].sort((a, b) => (a.date === b.date ? b.createdAt - a.createdAt : a.date < b.date ? 1 : -1));
+function sortedSavings() {
+  return savings().sort((a, b) => (a.date === b.date ? b.createdAt - a.createdAt : a.date < b.date ? 1 : -1));
 }
 
 function openDebts() {
   return state.debts.filter((d) => !d.settled);
+}
+
+function byDueDate(a, b) {
+  const na = nextDue(a);
+  const nb = nextDue(b);
+  if (na && nb) return na < nb ? -1 : na > nb ? 1 : 0;
+  if (na) return -1;
+  if (nb) return 1;
+  return a.name.localeCompare(b.name);
 }
 
 /** Open debts that are overdue or due within the "warn me ahead" window. */
@@ -95,6 +116,29 @@ function urgentDebts() {
     const info = dueInfo(d);
     return info && info.days <= 1;
   });
+}
+
+/** Everything the savings-goal panel needs. */
+function goalProgress() {
+  const g = state.goal;
+  if (!g) return null;
+  const t = todayISO();
+  const saved = round2(g.alreadySaved + sumSaved(savings().filter((e) => e.date >= g.startDate)));
+  const remaining = Math.max(0, round2(g.target - saved));
+  const pct = g.target > 0 ? Math.min(1, saved / g.target) : 0;
+  const daysLeft = daysBetween(t, g.dueDate);
+  const weeksLeft = Math.max(1, Math.ceil((daysLeft + 1) / 7));
+  const perWeek = remaining / weeksLeft;
+  const totalDays = Math.max(1, daysBetween(g.startDate, g.dueDate));
+  const elapsed = Math.min(totalDays, Math.max(0, daysBetween(g.startDate, t)));
+  const expected = g.target * (elapsed / totalDays);
+  const reached = remaining <= 0;
+  let status;
+  if (reached) status = { level: 'good', icon: ICON.check, text: 'Goal reached — well done!' };
+  else if (daysLeft < 0) status = { level: 'overdue', icon: ICON.alert, text: `Target date passed ${-daysLeft} day${daysLeft === -1 ? '' : 's'} ago` };
+  else if (saved + 0.005 >= expected) status = { level: 'good', icon: ICON.check, text: 'On track' };
+  else status = { level: 'behind', icon: ICON.clock, text: `Behind plan by ${money(expected - saved)}` };
+  return { g, saved, remaining, pct, daysLeft, perWeek, reached, status };
 }
 
 // ---------- Save + re-render ----------
@@ -138,13 +182,35 @@ async function updateBadges() {
   }
 }
 
-// ---------- Router ----------
+// ---------- Navigation (with a Back button) ----------
 
-const TABS = ['today', 'activity', 'debts', 'insights', 'settings'];
+const TABS = ['today', 'savings', 'debts', 'insights', 'settings'];
+const TAB_NAMES = { today: 'Today', savings: 'Savings', debts: 'Debts', insights: 'Insights', settings: 'Settings' };
 const currentTab = () => {
   const h = location.hash.replace('#', '');
+  if (h === 'activity') return 'savings';
   return TABS.includes(h) ? h : 'today';
 };
+
+function navigate(tab) {
+  if (!TABS.includes(tab) || tab === currentTab()) return;
+  const depth = (history.state && history.state.depth) || 0;
+  history.pushState({ depth: depth + 1, from: currentTab() }, '', `#${tab}`);
+  render();
+  window.scrollTo(0, 0);
+}
+
+function goBack() {
+  if (history.state && history.state.depth > 0) history.back();
+  else navigate('today');
+}
+
+function backButton() {
+  if (currentTab() === 'today') return '';
+  const st = history.state;
+  const label = st && st.depth > 0 ? TAB_NAMES[st.from] || 'Back' : 'Today';
+  return `<button type="button" class="back-btn" data-action="back">${ICON.back}<span>${esc(label)}</span></button>`;
+}
 
 function render() {
   const tab = currentTab();
@@ -154,11 +220,13 @@ function render() {
   });
   const view = $('#view');
   if (tab === 'today') renderToday(view);
-  else if (tab === 'activity') renderActivity(view);
+  else if (tab === 'savings') renderSavings(view);
   else if (tab === 'debts') renderDebts(view);
   else if (tab === 'insights') renderInsights(view);
   else renderSettings(view);
+  $('#backSlot').innerHTML = backButton();
   updateBadges();
+  animateBars();
   // A sheet that is open shows live data (e.g. a debt's balance) — refresh it too.
   if (sheet.open && sheetStack.length) showTopSheet();
 }
@@ -178,9 +246,13 @@ const addButton = (action, label) =>
 // ---------- Shared bits of markup ----------
 
 function tile(label, amount, color = '', big = false) {
+  return textTile(label, money(amount), color, big);
+}
+
+function textTile(label, value, color = '', big = false) {
   return `<div class="tile${big ? ' big' : ''}">
     <div class="tile-label">${color ? `<span class="dot" style="background:${color}"></span>` : ''}${esc(label)}</div>
-    <div class="tile-value">${esc(money(amount))}</div>
+    <div class="tile-value">${esc(value)}</div>
   </div>`;
 }
 
@@ -210,17 +282,12 @@ function dueLabel(info) {
 }
 
 function entryRow(e, showDate = false) {
-  const cat = CAT[e.category] || CAT.other;
-  const emoji = e.kind === 'spent' ? cat.emoji : SAVED_EMOJI;
-  const title = e.note || (e.kind === 'spent' ? cat.name : 'Savings');
-  const parts = [];
-  if (e.note) parts.push(e.kind === 'spent' ? cat.name : 'Savings');
-  if (showDate) parts.push(dayTitle(e.date));
-  const sub = parts.join(' · ');
+  const title = e.note || 'Savings';
+  const sub = showDate ? dayTitle(e.date) : '';
   return `<button class="row" data-action="edit-entry" data-id="${esc(e.id)}">
-    <span class="emoji-badge ${e.kind}" aria-hidden="true">${emoji}</span>
+    <span class="emoji-badge saved" aria-hidden="true">${SAVED_EMOJI}</span>
     <span class="row-main"><span class="row-title">${esc(title)}</span>${sub ? `<span class="row-sub">${esc(sub)}</span>` : ''}</span>
-    <span class="row-amount">${e.kind === 'spent' ? '−' : '+'}${esc(money(e.amount))}</span>
+    <span class="row-amount">+${esc(money(e.amount))}</span>
   </button>`;
 }
 
@@ -242,9 +309,10 @@ function debtRow(d) {
 }
 
 function debtMiniRow(d) {
+  const info = dueInfo(d);
   return `<button class="row" data-action="open-debt" data-id="${esc(d.id)}">
     <span class="emoji-badge ${d.direction}" aria-hidden="true">${debtEmoji(d)}</span>
-    <span class="row-main"><span class="row-title">${esc(d.name)}</span>${dueLabel(dueInfo(d))}</span>
+    <span class="row-main"><span class="row-title">${esc(d.name)}</span>${info ? dueLabel(info) : '<span class="row-sub">No due date</span>'}</span>
     <span class="row-end"><span class="row-amount">${esc(money(remainingOf(d)))}</span><span class="row-sub">${d.direction === 'iOwe' ? 'to pay' : 'to get back'}</span></span>
   </button>`;
 }
@@ -254,57 +322,127 @@ function storageNotice() {
   return `<div class="notice" role="alert"><strong>This browser isn't saving your data.</strong> Private browsing or blocked website data can cause this. Open MoneyTrack in a normal Safari or Chrome window.</div>`;
 }
 
+// Progress bars grow from where they were to the new value (the "loading" feel).
+const lastBarWidth = new Map();
+function animateBars() {
+  const bars = $$('[data-fill]');
+  if (!bars.length) return;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    for (const el of bars) {
+      el.style.width = el.dataset.fill;
+      lastBarWidth.set(el.dataset.key, el.dataset.fill);
+    }
+  }));
+}
+
+function goalCard() {
+  const p = goalProgress();
+  if (!p) {
+    return `<section class="card goal-card">
+      <div class="goal-empty">
+        <span class="emoji-badge saved" aria-hidden="true">🎯</span>
+        <span><strong>Set a savings goal</strong><small>Choose a target and a date, then watch the bar fill up as you save.</small></span>
+      </div>
+      <button class="btn btn-saved" data-action="edit-goal">${ICON.plus}Set a goal</button>
+    </section>`;
+  }
+  const { g, saved, remaining, pct, daysLeft, perWeek, reached, status } = p;
+  const pctText = `${Math.floor(pct * 100)}%`;
+  const width = `${(pct * 100).toFixed(1)}%`;
+  const start = lastBarWidth.get('goal') || '0%';
+  let when;
+  if (reached) when = longDate(g.dueDate);
+  else if (daysLeft > 1) when = `${daysLeft} days left`;
+  else if (daysLeft === 1) when = '1 day left';
+  else if (daysLeft === 0) when = 'Due today';
+  else when = 'Date passed';
+  return `<section class="card goal-card" aria-label="Savings goal">
+    <div class="card-head"><h2>🎯 ${esc(g.name || 'Savings goal')}</h2><button class="link-btn" data-action="edit-goal">Edit</button></div>
+    <div class="goal-amounts"><span class="goal-saved">${esc(money(saved))}</span><span class="muted">saved of ${esc(money(g.target))}</span></div>
+    <div class="goal-progress">
+      <div class="goal-bar" role="progressbar" aria-label="Goal progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct * 100)}">
+        <span data-fill="${width}" data-key="goal" style="width:${start}"></span>
+      </div>
+      <span class="goal-pct">${pctText}</span>
+    </div>
+    <div class="goal-facts">
+      ${reached ? textTile('Target', money(g.target)) : textTile('Still needed', money(remaining))}
+      ${textTile(`By ${shortDate(g.dueDate)}`, when)}
+      ${reached || daysLeft < 0 ? '' : textTile('Per week', money(perWeek))}
+    </div>
+    <p class="goal-status ${status.level}">${status.icon}${esc(status.text)}</p>
+  </section>`;
+}
+
+function debtGroup(title, list) {
+  if (!list.length) return '';
+  const shown = list.slice(0, 5);
+  const more = list.length - shown.length;
+  return `<h3 class="mini-title">${esc(title)}</h3>
+    <div class="rows">${shown.map(debtMiniRow).join('')}</div>
+    ${more > 0 ? `<button class="link-btn" data-action="goto" data-arg="debts">See ${more} more</button>` : ''}`;
+}
+
 // ---------- Today ----------
 
 function renderToday(view) {
   const t = todayISO();
-  const month = monthOf(t);
-  const todays = state.entries.filter((e) => e.date === t);
-  const monthly = state.entries.filter((e) => monthOf(e.date) === month && e.date <= t);
-  const open = openDebts();
-  const iOwe = open.filter((d) => d.direction === 'iOwe').reduce((s, d) => s + remainingOf(d), 0);
-  const owed = open.filter((d) => d.direction === 'owedToMe').reduce((s, d) => s + remainingOf(d), 0);
+  const wk = weekStart(t);
+  const all = savings();
+  const todaySaved = savedBetween(t, t);
+  const weekSaved = savedBetween(wk, t);
+  const daysSoFar = daysBetween(wk, t) + 1;
+  const monthSaved = savedBetween(`${monthOf(t)}-01`, t);
+  const open = openDebts().sort(byDueDate);
+  const iOweList = open.filter((d) => d.direction === 'iOwe');
+  const owedList = open.filter((d) => d.direction === 'owedToMe');
+  const iOwe = iOweList.reduce((s, d) => s + remainingOf(d), 0);
+  const owed = owedList.reduce((s, d) => s + remainingOf(d), 0);
   const upcoming = upcomingDebts();
-  const urgent = urgentDebts();
-  const recent = sortedEntries().slice(0, 5);
-  const dayOfMonth = new Date().getDate();
+  const recent = sortedSavings().slice(0, 5);
 
   setHeader('Today', fmtDate(t, { weekday: 'long', day: 'numeric', month: 'long' }), addButton('add-menu', 'Add'));
 
   let banner = '';
-  if (urgent.length) {
-    const names = urgent.slice(0, 3).map((d) => `${d.name}: ${dueInfo(d).text.toLowerCase()}`).join(' · ');
-    banner = `<button class="alert-banner" data-action="goto" data-arg="debts">
+  if (upcoming.length) {
+    const overdue = upcoming.filter((d) => dueInfo(d).days < 0).length;
+    const names = upcoming.slice(0, 3).map((d) => `${d.name}: ${dueInfo(d).text.toLowerCase()}`).join(' · ');
+    const title = overdue
+      ? `${upcoming.length === 1 ? '1 payment needs' : `${upcoming.length} payments need`} attention`
+      : `${upcoming.length === 1 ? '1 payment' : `${upcoming.length} payments`} due soon`;
+    banner = `<button class="alert-banner${overdue ? '' : ' soon'}" data-action="goto" data-arg="debts">
       <span class="lead">${ICON.alert}</span>
-      <span class="grow"><strong>${urgent.length === 1 ? '1 payment needs attention' : `${urgent.length} payments need attention`}</strong><small>${esc(names)}</small></span>
+      <span class="grow"><strong>${esc(title)}</strong><small>${esc(names)}</small></span>
       ${ICON.chevron}
     </button>`;
   }
 
   view.innerHTML = `
     ${storageNotice()}
+    ${goalCard()}
     ${banner}
     <section class="card" aria-label="Today">
       <div class="tiles">
-        ${tile('Spent today', sumKind(todays, 'spent'), 'var(--spent)', true)}
-        ${tile('Saved today', sumKind(todays, 'saved'), 'var(--saved)', true)}
+        ${tile('Saved today', todaySaved, 'var(--saved)', true)}
+        ${tile('Saved all-time', sumSaved(all), '', true)}
       </div>
       <div class="btn-row">
-        <button class="btn btn-spent" data-action="add-entry" data-kind="spent">${ICON.minus}Spent</button>
-        <button class="btn btn-saved" data-action="add-entry" data-kind="saved">${ICON.plus}Saved</button>
+        <button class="btn btn-saved" data-action="add-entry">${ICON.plus}Add saving</button>
+        <button class="btn btn-secondary" data-action="add-debt">${ICON.plus}Debt / loan</button>
       </div>
     </section>
 
     <section class="card">
-      ${cardHead('This month', 'Insights', 'goto', 'insights')}
+      ${cardHead(`This week · ${shortDate(wk)} – ${shortDate(addDays(wk, 6))}`, 'Insights', 'goto', 'insights')}
       <div class="tiles">
-        ${tile('Spent', sumKind(monthly, 'spent'), 'var(--spent)')}
-        ${tile('Saved', sumKind(monthly, 'saved'), 'var(--saved)')}
+        ${tile('Saved this week', weekSaved, 'var(--saved)')}
+        ${tile('Average a day', weekSaved / daysSoFar)}
       </div>
+      <div id="weekChart" class="week-chart"></div>
       <hr>
       <div class="tiles">
-        ${tile('Avg spend / day', sumKind(monthly, 'spent') / dayOfMonth)}
-        ${tile('Saved all-time', sumKind(state.entries, 'saved'))}
+        ${tile('Saved this month', monthSaved)}
+        ${textTile('Days saved', `${new Set(all.filter((e) => e.date >= wk && e.date <= t).map((e) => e.date)).size} of ${daysSoFar}`)}
       </div>
     </section>
 
@@ -314,47 +452,60 @@ function renderToday(view) {
         ${tile('I owe', iOwe, 'var(--owe)')}
         ${tile('Owed to me', owed, 'var(--owed)')}
       </div>
-      ${open.length ? '' : '<p class="muted small" style="margin-top:12px">Nothing open. Tap + to add a loan, money you borrowed, or money you lent.</p>'}
+      ${open.length
+        ? `${debtGroup('I need to pay', iOweList)}${debtGroup('Owes me', owedList)}`
+        : '<p class="muted small" style="margin-top:12px">Nothing open. Tap + to add a loan, money you borrowed, or money you lent.</p>'}
     </section>
 
-    ${upcoming.length ? `<section class="card">${cardHead('Coming up')}<div class="rows">${upcoming.slice(0, 5).map(debtMiniRow).join('')}</div></section>` : ''}
-
     <section class="card">
-      ${cardHead('Recent', recent.length ? 'See all' : '', 'goto', 'activity')}
+      ${cardHead('Recent savings', recent.length ? 'See all' : '', 'goto', 'savings')}
       ${recent.length
-        ? `<div class="rows">${recent.map((e) => entryRow(e, e.date !== t)).join('')}</div>`
-        : '<p class="muted small">Nothing logged yet. Tap <b>Spent</b> or <b>Saved</b> above to add your first entry.</p>'}
+        ? `<div class="rows">${recent.map((e) => entryRow(e, true)).join('')}</div>`
+        : '<p class="muted small">Nothing saved yet. Tap <b>Add saving</b> above to log your first one.</p>'}
     </section>`;
+
+  // Mon–Sun mini chart for this week.
+  const points = [];
+  for (let i = 0; i < 7; i += 1) {
+    const d = addDays(wk, i);
+    points.push({
+      tick: fmtDate(d, { weekday: 'narrow' }),
+      title: fmtDate(d, { weekday: 'long', day: 'numeric', month: 'short' }) + (d > t ? ' (coming up)' : ''),
+      values: { saved: d > t ? 0 : savedBetween(d, d) },
+    });
+  }
+  columnChart($('#weekChart'), {
+    points,
+    series: [{ key: 'saved', label: 'Saved', color: 'var(--saved)' }],
+    format: money,
+    formatAxis,
+    plotHeight: 90,
+    ariaLabel: 'Saved each day this week. Tap a day for its amount.',
+  });
 }
 
-// ---------- Activity ----------
+// ---------- Savings list ----------
 
-function renderActivity(view) {
-  setHeader('Activity', '', addButton('add-menu', 'Add'));
+function renderSavings(view) {
+  setHeader('Savings', '', addButton('add-entry', 'Add saving'));
   view.innerHTML = `
     <div class="toolbar">
-      <input type="search" class="search" id="activitySearch" placeholder="Search notes or categories" aria-label="Search entries" value="${esc(ui.activitySearch)}" autocomplete="off">
-      ${seg('activityFilter', [['all', 'All'], ['spent', 'Spent'], ['saved', 'Saved']], ui.activityFilter, 'Show')}
+      <input type="search" class="search" id="savingsSearch" placeholder="Search notes" aria-label="Search savings" value="${esc(ui.search)}" autocomplete="off">
     </div>
-    <div id="activityList" class="toolbar" style="gap:16px"></div>`;
-  renderActivityList();
+    <div id="savingsList" class="toolbar" style="gap:16px"></div>`;
+  renderSavingsList();
 }
 
-function renderActivityList() {
-  const host = $('#activityList');
+function renderSavingsList() {
+  const host = $('#savingsList');
   if (!host) return;
-  const q = ui.activitySearch.trim().toLowerCase();
-  const list = sortedEntries().filter((e) => {
-    if (ui.activityFilter !== 'all' && e.kind !== ui.activityFilter) return false;
-    if (!q) return true;
-    const cat = e.kind === 'spent' ? (CAT[e.category] || CAT.other).name : 'Savings';
-    return e.note.toLowerCase().includes(q) || cat.toLowerCase().includes(q);
-  });
+  const q = ui.search.trim().toLowerCase();
+  const list = sortedSavings().filter((e) => !q || (e.note || 'savings').toLowerCase().includes(q));
 
   if (!list.length) {
-    host.innerHTML = q || ui.activityFilter !== 'all'
-      ? `<div class="empty"><span class="big-emoji">🔍</span><strong>No matches</strong>Try a different search or filter.</div>`
-      : `<div class="empty"><span class="big-emoji">🧾</span><strong>No entries yet</strong>Log what you spend and save, and it shows up here.</div>`;
+    host.innerHTML = q
+      ? '<div class="empty"><span class="big-emoji">🔍</span><strong>No matches</strong>Try a different search.</div>'
+      : '<div class="empty"><span class="big-emoji">💰</span><strong>No savings yet</strong>Every amount you put aside shows up here.</div>';
     return;
   }
 
@@ -364,15 +515,10 @@ function renderActivityList() {
     if (last && last.date === e.date) last.items.push(e);
     else groups.push({ date: e.date, items: [e] });
   }
-  host.innerHTML = groups.map((g) => {
-    const spent = sumKind(g.items, 'spent');
-    const saved = sumKind(g.items, 'saved');
-    const totals = [spent ? `−${money(spent)}` : '', saved ? `+${money(saved)}` : ''].filter(Boolean).join('  ');
-    return `<section class="list-group">
-      <div class="group-head"><h2>${esc(dayTitle(g.date))}</h2><span>${esc(totals)}</span></div>
+  host.innerHTML = groups.map((g) => `<section class="list-group">
+      <div class="group-head"><h2>${esc(dayTitle(g.date))}</h2><span>+${esc(money(sumSaved(g.items)))}</span></div>
       <div class="card rows">${g.items.map((e) => entryRow(e)).join('')}</div>
-    </section>`;
-  }).join('');
+    </section>`).join('');
 }
 
 // ---------- Debts ----------
@@ -381,14 +527,7 @@ function renderDebts(view) {
   setHeader('Debts', '', addButton('add-debt', 'Add debt or loan'));
   const dir = ui.debtDirection;
   const mine = state.debts.filter((d) => d.direction === dir);
-  const open = mine.filter((d) => !d.settled).sort((a, b) => {
-    const na = nextDue(a);
-    const nb = nextDue(b);
-    if (na && nb) return na < nb ? -1 : na > nb ? 1 : 0;
-    if (na) return -1;
-    if (nb) return 1;
-    return a.name.localeCompare(b.name);
-  });
+  const open = mine.filter((d) => !d.settled).sort(byDueDate);
   const settled = mine.filter((d) => d.settled).sort((a, b) => (b.settledDate || '').localeCompare(a.settledDate || ''));
   const total = open.reduce((s, d) => s + remainingOf(d), 0);
 
@@ -413,109 +552,101 @@ function renderDebts(view) {
 
 // ---------- Insights ----------
 
-function insightsData() {
-  const t = todayISO();
-  const range = ui.insightsRange;
-  if (range === '6m') {
-    const thisMonth = monthOf(t);
-    const months = [];
-    for (let i = 5; i >= 0; i -= 1) months.push(addMonths(thisMonth, -i));
-    const first = `${months[0]}-01`;
-    const entries = state.entries.filter((e) => e.date >= first && e.date <= t);
-    const points = months.map((m) => {
-      const list = entries.filter((e) => monthOf(e.date) === m);
-      return { tick: monthName(m), title: monthName(m, 'long'), values: { spent: sumKind(list, 'spent'), saved: sumKind(list, 'saved') } };
-    });
-    return { entries, points, days: daysBetween(first, t) + 1, labelEvery: 1, unit: 'Month' };
+function drawSavedChart(hostId, key, points, unit, labelEvery, ariaLabel) {
+  const host = $(`#${hostId}`);
+  if (!points.some((p) => p.values.saved > 0)) {
+    host.innerHTML = '<p class="empty-chart">No savings logged in this period yet.</p>';
+    return;
   }
-  const n = range === '30d' ? 30 : 7;
-  const start = addDays(t, -(n - 1));
-  const entries = state.entries.filter((e) => e.date >= start && e.date <= t);
-  const points = [];
-  for (let i = 0; i < n; i += 1) {
-    const d = addDays(start, i);
-    const list = entries.filter((e) => e.date === d);
-    points.push({
-      tick: n === 7 ? fmtDate(d, { weekday: 'short' }) : String(fromISO(d).getDate()),
-      title: fmtDate(d, { weekday: 'long', day: 'numeric', month: 'long' }),
-      values: { spent: sumKind(list, 'spent'), saved: sumKind(list, 'saved') },
-    });
+  if (ui.tableView[key]) {
+    chartTable(host, { columns: [unit, 'Saved'], rows: points.map((p) => [p.title, money(p.values.saved)]) });
+    return;
   }
-  return { entries, points, days: n, labelEvery: n === 7 ? 1 : 5, unit: 'Day' };
+  columnChart(host, {
+    points,
+    series: [{ key: 'saved', label: 'Saved', color: 'var(--saved)' }],
+    format: money,
+    formatAxis,
+    labelEvery,
+    ariaLabel,
+  });
 }
 
 function renderInsights(view) {
   setHeader('Insights');
-  const data = insightsData();
-  const spent = sumKind(data.entries, 'spent');
-  const saved = sumKind(data.entries, 'saved');
-  const series = [
-    { key: 'spent', label: 'Spent', color: 'var(--spent)' },
-    { key: 'saved', label: 'Saved', color: 'var(--saved)' },
-  ];
+  const t = todayISO();
+  const n = ui.insightsRange === '30d' ? 30 : 7;
+  const start = addDays(t, -(n - 1));
+  const period = savings().filter((e) => e.date >= start && e.date <= t);
+  const total = sumSaved(period);
+  const daysWith = new Set(period.map((e) => e.date)).size;
 
-  const byCat = new Map();
-  for (const e of data.entries) {
-    if (e.kind !== 'spent') continue;
-    byCat.set(e.category, (byCat.get(e.category) || 0) + e.amount);
+  const daily = [];
+  for (let i = 0; i < n; i += 1) {
+    const d = addDays(start, i);
+    daily.push({
+      tick: n === 7 ? fmtDate(d, { weekday: 'short' }) : String(fromISO(d).getDate()),
+      title: fmtDate(d, { weekday: 'long', day: 'numeric', month: 'long' }),
+      values: { saved: savedBetween(d, d) },
+    });
   }
-  const cats = [...byCat.entries()]
-    .map(([id, value]) => ({ label: (CAT[id] || CAT.other).name, emoji: (CAT[id] || CAT.other).emoji, value }))
-    .sort((a, b) => b.value - a.value);
 
-  const toggle = (key) => `<button class="link-btn" data-action="toggle-table" data-arg="${key}">${ui.tableView[key] ? 'Show chart' : 'Show table'}</button>`;
+  // Last 6 months, week by week (26 weeks, Monday to Sunday).
+  const thisWeek = weekStart(t);
+  const weekly = [];
+  for (let i = 25; i >= 0; i -= 1) {
+    const ws = addDays(thisWeek, -7 * i);
+    const we = addDays(ws, 6);
+    weekly.push({
+      tick: shortDate(ws),
+      title: `Week of ${shortDate(ws)} – ${shortDate(we)}`,
+      values: { saved: savedBetween(ws, we < t ? we : t) },
+    });
+  }
+  const weeklyTotal = weekly.reduce((s, p) => s + p.values.saved, 0);
+
+  // Last 6 months, month by month.
+  const thisMonth = monthOf(t);
+  const monthly = [];
+  for (let i = 5; i >= 0; i -= 1) {
+    const m = addMonths(thisMonth, -i);
+    monthly.push({ tick: monthName(m), title: monthName(m, 'long'), values: { saved: savedBetween(`${m}-01`, `${m}-31`) } });
+  }
+  const monthlyTotal = monthly.reduce((s, p) => s + p.values.saved, 0);
+
+  const toggle = (key, has) => (has
+    ? `<button class="link-btn" data-action="toggle-table" data-arg="${key}">${ui.tableView[key] ? 'Show chart' : 'Show table'}</button>`
+    : '');
 
   view.innerHTML = `
-    <div class="filter-row">${seg('insightsRange', [['7d', '7 days'], ['30d', '30 days'], ['6m', '6 months']], ui.insightsRange, 'Time range')}</div>
+    <div class="filter-row">${seg('insightsRange', [['7d', '7 days'], ['30d', '30 days']], ui.insightsRange, 'Time range')}</div>
     <section class="card">
       <div class="tiles three">
-        ${tile('Spent', spent, 'var(--spent)')}
-        ${tile('Saved', saved, 'var(--saved)')}
-        ${tile('Avg / day', spent / data.days)}
+        ${tile('Saved', total, 'var(--saved)')}
+        ${tile('Avg / day', total / n)}
+        ${textTile('Days saved', `${daysWith} of ${n}`)}
       </div>
     </section>
     <section class="card">
-      <div class="card-head"><h2>Spent vs saved</h2>${toggle('trend')}</div>
-      <div id="trendChart"></div>
+      <div class="card-head"><h2>Saved each day</h2>${toggle('daily', total > 0)}</div>
+      <div id="dailyChart"></div>
+    </section>
+
+    <h2 class="section-title">Last 6 months</h2>
+    <section class="card">
+      <div class="card-head"><h2>Weekly savings</h2>${toggle('weekly', weeklyTotal > 0)}</div>
+      <p class="chart-sub">${esc(money(weeklyTotal))} over 26 weeks · about ${esc(money(weeklyTotal / 26))} a week</p>
+      <div id="weeklyChart"></div>
     </section>
     <section class="card">
-      <div class="card-head"><h2>Where your money went</h2>${cats.length ? toggle('cats') : ''}</div>
-      <div id="catChart"></div>
+      <div class="card-head"><h2>Monthly savings</h2>${toggle('monthly', monthlyTotal > 0)}</div>
+      <p class="chart-sub">${esc(money(monthlyTotal))} over 6 months · about ${esc(money(monthlyTotal / 6))} a month</p>
+      <div id="monthlyChart"></div>
     </section>`;
 
-  // Spent vs saved
-  const trend = $('#trendChart');
-  if (!spent && !saved) {
-    trend.innerHTML = '<p class="empty-chart">Nothing logged in this period yet.</p>';
-  } else if (ui.tableView.trend) {
-    chartTable(trend, {
-      columns: [data.unit, 'Spent', 'Saved'],
-      rows: data.points.map((p) => [p.title, money(p.values.spent), money(p.values.saved)]),
-    });
-  } else {
-    trend.before(legend(series));
-    columnChart(trend, {
-      points: data.points,
-      series,
-      format: money,
-      formatAxis: (v) => (v >= 1000 ? moneyCompact(v) : Number.isInteger(v) ? moneyRound(v) : money(v)),
-      labelEvery: data.labelEvery,
-      ariaLabel: `Spent and saved per ${data.unit.toLowerCase()}. Tap a column for its amounts, or use Show table.`,
-    });
-  }
-
-  // Categories
-  const catHost = $('#catChart');
-  if (!cats.length) {
-    catHost.innerHTML = '<p class="empty-chart">No spending in this period yet.</p>';
-  } else if (ui.tableView.cats) {
-    chartTable(catHost, {
-      columns: ['Category', 'Spent', 'Share'],
-      rows: cats.map((c) => [`${c.emoji} ${c.label}`, money(c.value), `${Math.round((c.value / spent) * 100)}%`]),
-    });
-  } else {
-    hBars(catHost, { items: cats, format: moneyRound, color: 'var(--spent)' });
-  }
+  drawSavedChart('dailyChart', 'daily', daily, 'Day', n === 7 ? 1 : 5, 'Saved each day. Tap a column for its amount, or use Show table.');
+  drawSavedChart('weeklyChart', 'weekly', weekly, 'Week', 4, 'Saved each week for the last 26 weeks. Tap a column for its amount, or use Show table.');
+  drawSavedChart('monthlyChart', 'monthly', monthly, 'Month', 1, 'Saved each month for the last 6 months. Tap a column for its amount, or use Show table.');
 }
 
 // ---------- Settings ----------
@@ -531,7 +662,7 @@ function renderSettings(view) {
       return code;
     }
   };
-  const isEmpty = !state.entries.length && !state.debts.length;
+  const isEmpty = !savings().length && !state.debts.length && !state.goal;
   const canBadge = 'setAppBadge' in navigator && 'Notification' in window;
   let badgeRow = '';
   if (canBadge) {
@@ -557,6 +688,7 @@ function renderSettings(view) {
             <option value="dark" ${s.theme === 'dark' ? 'selected' : ''}>Dark</option>
           </select>
         </label>
+        <button class="list-btn" data-action="edit-goal">${state.goal ? 'Edit savings goal' : 'Set a savings goal'}</button>
       </div>
     </section>
 
@@ -570,7 +702,7 @@ function renderSettings(view) {
         </label>
         ${badgeRow}
       </div>
-      <p class="footnote">Payments that are due soon or overdue show on the Today screen and on the Debts tab. For a phone alert even when MoneyTrack is closed, open a debt and tap <b>Add to Calendar</b> — your calendar reminds you at 9 am the day before and on the day.</p>
+      <p class="footnote">Payments that are due soon or overdue show at the top of the Today screen and on the Debts tab. For a phone alert even when MoneyTrack is closed, open a debt and tap <b>Add to Calendar</b> — your calendar reminds you at 9 am the day before and on the day.</p>
     </section>
 
     <section>
@@ -671,12 +803,13 @@ function amountField(value, autofocus) {
     <p class="field-error" id="amtError" hidden></p>`;
 }
 
-function bindAmount(root) {
-  const input = $('#amt', root);
+function bindAmount(root, selector = '#amt') {
+  const input = $(selector, root);
   input.addEventListener('input', () => {
     const clean = sanitizeAmount(input.value);
     if (clean !== input.value) input.value = clean;
-    $('#amtError', root).hidden = true;
+    const err = $('#amtError', root);
+    if (err) err.hidden = true;
   });
 }
 
@@ -701,44 +834,38 @@ function addMenuSheet() {
     root.innerHTML = `${sheetHead('Add', { cancel: 'Close' })}
       <div class="sheet-body">
         <div class="choice-list">
-          <button class="choice" data-action="add-entry" data-kind="spent" data-replace="1"><span class="emoji-badge spent" aria-hidden="true">💸</span><span><b>Spending</b><small>Money you spent</small></span></button>
-          <button class="choice" data-action="add-entry" data-kind="saved" data-replace="1"><span class="emoji-badge saved" aria-hidden="true">💰</span><span><b>Saving</b><small>Money you put aside</small></span></button>
+          <button class="choice" data-action="add-entry" data-replace="1"><span class="emoji-badge saved" aria-hidden="true">💰</span><span><b>Saving</b><small>Money you put aside</small></span></button>
           <button class="choice" data-action="add-debt" data-replace="1"><span class="emoji-badge iOwe" aria-hidden="true">🤝</span><span><b>Debt or loan</b><small>Money you owe, or money someone owes you</small></span></button>
+          <button class="choice" data-action="edit-goal" data-replace="1"><span class="emoji-badge owedToMe" aria-hidden="true">🎯</span><span><b>Savings goal</b><small>${state.goal ? 'Change your target or date' : 'Set a target and a date to reach it'}</small></span></button>
         </div>
       </div>`;
   });
 }
 
-// Spending / saving entry
-function entrySheet(kind = 'spent', id = null) {
+// Saving entry
+function entrySheet(id = null) {
   const existing = id ? state.entries.find((e) => e.id === id) : null;
   const f = {
-    kind: existing ? existing.kind : kind,
-    category: existing && existing.kind === 'spent' ? existing.category : 'food',
     amount: existing ? String(existing.amount) : '',
     date: existing ? existing.date : todayISO(),
     note: existing ? existing.note : '',
   };
-  const titleFor = () => (existing ? 'Edit entry' : f.kind === 'spent' ? 'New spending' : 'New saving');
-  const notePlaceholder = () => (f.kind === 'spent' ? 'What was it for?' : 'e.g. Emergency fund');
 
   openSheet((root) => {
+    const p = goalProgress();
+    const goalHint = p && !p.reached
+      ? `<p class="footnote">Savings dated from ${esc(shortDate(p.g.startDate))} count toward <b>${esc(p.g.name || 'your goal')}</b> — ${esc(money(p.remaining))} to go.</p>`
+      : '';
     root.innerHTML = `
-      ${sheetHead(titleFor(), { save: 'entryForm' })}
+      ${sheetHead(existing ? 'Edit saving' : 'New saving', { save: 'entryForm' })}
       <form id="entryForm" class="sheet-body" novalidate autocomplete="off">
-        ${formSeg('kind', [['spent', 'Spent'], ['saved', 'Saved']], f.kind, 'Type')}
         ${amountField(f.amount, !existing)}
-        <section class="cat-section" ${f.kind === 'saved' ? 'hidden' : ''}>
-          <h3 class="group-title">Category</h3>
-          <div class="cat-grid">
-            ${CATEGORIES.map((c) => `<button type="button" class="cat" data-cat="${c.id}" aria-pressed="${c.id === f.category}"><span class="cat-emoji" aria-hidden="true">${c.emoji}</span><span class="cat-name">${esc(c.name)}</span></button>`).join('')}
-          </div>
-        </section>
         <div class="card form-list">
           <label class="field"><span>Date</span><input type="date" name="date" value="${esc(f.date)}" required></label>
-          <label class="field"><span>Note</span><input type="text" name="note" maxlength="80" value="${esc(f.note)}" placeholder="${esc(notePlaceholder())}"></label>
+          <label class="field"><span>Note</span><input type="text" name="note" maxlength="80" value="${esc(f.note)}" placeholder="e.g. Emergency fund"></label>
         </div>
-        ${existing ? `<button type="button" class="btn btn-danger-outline" data-action="delete-entry" data-id="${esc(existing.id)}">${ICON.trash}Delete entry</button>` : ''}
+        ${goalHint}
+        ${existing ? `<button type="button" class="btn btn-danger-outline" data-action="delete-entry" data-id="${esc(existing.id)}">${ICON.trash}Delete saving</button>` : ''}
       </form>`;
 
     const form = $('#entryForm', root);
@@ -749,16 +876,6 @@ function entrySheet(kind = 'spent', id = null) {
       f.date = form.date.value || f.date;
       f.note = form.note.value;
     });
-    bindFormSeg(root, 'kind', (value) => {
-      f.kind = value;
-      $('.cat-section', root).hidden = value === 'saved';
-      $('#sheetTitle', root).textContent = titleFor();
-      form.note.placeholder = notePlaceholder();
-    });
-    $$('.cat', root).forEach((b) => b.addEventListener('click', () => {
-      f.category = b.dataset.cat;
-      $$('.cat', root).forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
-    }));
     form.addEventListener('submit', (ev) => {
       ev.preventDefault();
       const amount = parseAmount($('#amt', root).value);
@@ -767,17 +884,93 @@ function entrySheet(kind = 'spent', id = null) {
         $('#amt', root).focus();
         return;
       }
+      const before = goalProgress();
       const record = {
-        kind: f.kind,
+        kind: 'saved',
         amount,
         date: form.date.value || todayISO(),
-        category: f.kind === 'spent' ? f.category : 'other',
+        category: 'other',
         note: form.note.value.trim().slice(0, 80),
       };
       if (existing) Object.assign(existing, record);
       else state.entries.push({ id: uid(), createdAt: Date.now(), ...record });
+      const after = goalProgress();
       closeSheet();
-      commit(existing ? 'Entry updated' : `${f.kind === 'spent' ? 'Spent' : 'Saved'} ${money(amount)} — saved`);
+      if (before && after && !before.reached && after.reached) commit('Goal reached — well done! 🎉');
+      else commit(existing ? 'Saving updated' : `Saved ${money(amount)}`);
+    });
+  });
+}
+
+// Savings goal
+function goalSheet() {
+  const g = state.goal;
+  const f = {
+    name: g ? g.name : '',
+    target: g ? String(g.target) : '',
+    dueDate: g ? g.dueDate : addDays(todayISO(), 90),
+    startDate: g ? g.startDate : todayISO(),
+    already: g && g.alreadySaved ? String(g.alreadySaved) : '',
+  };
+  openSheet((root) => {
+    root.innerHTML = `
+      ${sheetHead(g ? 'Edit goal' : 'New savings goal', { save: 'goalForm' })}
+      <form id="goalForm" class="sheet-body" novalidate autocomplete="off">
+        <div class="card form-list">
+          <label class="field"><span>Goal name</span><input type="text" name="name" maxlength="60" value="${esc(f.name)}" placeholder="e.g. New laptop"></label>
+        </div>
+        <h3 class="group-title" style="margin-bottom:-8px">Target amount</h3>
+        ${amountField(f.target, !g)}
+        <div class="card form-list">
+          <label class="field"><span>Reach it by</span><input type="date" name="dueDate" value="${esc(f.dueDate)}"></label>
+          <label class="field"><span>Count savings from</span><input type="date" name="startDate" value="${esc(f.startDate)}"></label>
+          <label class="field"><span>Already saved</span><input type="text" name="already" inputmode="decimal" maxlength="12" value="${esc(f.already)}" placeholder="0"></label>
+        </div>
+        <p class="footnote">Every saving you log from the “count savings from” date adds to this goal. Use “Already saved” for money you had put aside before that.</p>
+        <p class="field-error" id="goalError" hidden></p>
+        ${g ? `<button type="button" class="btn btn-danger-outline" data-action="delete-goal">${ICON.trash}Remove goal</button>` : ''}
+      </form>`;
+
+    const form = $('#goalForm', root);
+    bindAmount(root);
+    bindAmount(root, 'input[name="already"]');
+    form.addEventListener('input', () => {
+      f.name = form.name.value;
+      f.target = $('#amt', root).value;
+      f.dueDate = form.dueDate.value || f.dueDate;
+      f.startDate = form.startDate.value || f.startDate;
+      f.already = form.already.value;
+      $('#goalError', root).hidden = true;
+    });
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const target = parseAmount($('#amt', root).value);
+      if (!target) {
+        showError(root, 'amtError', 'Enter how much you want to save.');
+        $('#amt', root).focus();
+        return;
+      }
+      const dueDate = form.dueDate.value;
+      const startDate = form.startDate.value || todayISO();
+      if (!dueDate) {
+        showError(root, 'goalError', 'Choose the date you want to reach your goal by.');
+        return;
+      }
+      if (dueDate <= startDate) {
+        showError(root, 'goalError', 'The target date needs to be after the “count savings from” date.');
+        return;
+      }
+      state.goal = {
+        name: form.name.value.trim().slice(0, 60),
+        target,
+        dueDate,
+        startDate,
+        alreadySaved: parseAmount(form.already.value) || 0,
+        createdAt: g ? g.createdAt : Date.now(),
+      };
+      lastBarWidth.delete('goal');
+      closeSheet();
+      commit(g ? 'Goal updated' : 'Goal set — good luck!');
     });
   });
 }
@@ -1049,9 +1242,14 @@ function csvCell(v) {
 }
 
 function exportCSV() {
-  const rows = [['Date', 'Type', 'Category', 'Amount', 'Currency', 'Note']];
-  for (const e of sortedEntries()) {
-    rows.push([e.date, e.kind === 'spent' ? 'Spent' : 'Saved', e.kind === 'spent' ? (CAT[e.category] || CAT.other).name : 'Savings', e.amount.toFixed(2), state.settings.currency, e.note]);
+  const rows = [['Savings'], ['Date', 'Amount', 'Currency', 'Note']];
+  for (const e of sortedSavings()) rows.push([e.date, e.amount.toFixed(2), state.settings.currency, e.note]);
+  if (state.goal) {
+    const p = goalProgress();
+    rows.push([]);
+    rows.push(['Savings goal']);
+    rows.push(['Name', 'Target', 'Saved so far', 'Still needed', 'Reach it by']);
+    rows.push([state.goal.name, state.goal.target.toFixed(2), p.saved.toFixed(2), p.remaining.toFixed(2), state.goal.dueDate]);
   }
   rows.push([]);
   rows.push(['Debts & loans']);
@@ -1072,10 +1270,12 @@ async function importBackup(file) {
     const parsed = JSON.parse(text);
     if (!parsed || (!Array.isArray(parsed.entries) && !Array.isArray(parsed.debts))) throw new Error('not a backup');
     const data = normalise(parsed);
-    const ok = confirm(`Replace everything on this device with this backup?\n\n${data.entries.length} entries and ${data.debts.length} debts will be restored.`);
+    const savedCount = data.entries.filter((e) => e.kind === 'saved').length;
+    const ok = confirm(`Replace everything on this device with this backup?\n\n${savedCount} savings and ${data.debts.length} debts will be restored.`);
     if (!ok) return;
     state = data;
     fmtCache.clear();
+    lastBarWidth.clear();
     applyTheme();
     commit('Backup restored');
   } catch {
@@ -1128,12 +1328,22 @@ function addToCalendar(d) {
 // ---------- Actions ----------
 
 document.addEventListener('click', (ev) => {
+  const tabLink = ev.target.closest('.tabbar a[data-tab]');
+  if (tabLink) {
+    ev.preventDefault();
+    navigate(tabLink.dataset.tab);
+    return;
+  }
   const btn = ev.target.closest('[data-action]');
   if (!btn) return;
-  const { action, id, kind, arg } = btn.dataset;
+  const { action, id, arg } = btn.dataset;
   switch (action) {
     case 'goto':
-      location.hash = arg;
+      closeAllSheets();
+      navigate(arg);
+      break;
+    case 'back':
+      goBack();
       break;
     case 'seg':
       ui[btn.dataset.name] = btn.dataset.value;
@@ -1148,16 +1358,28 @@ document.addEventListener('click', (ev) => {
       break;
     case 'add-entry':
       if (btn.dataset.replace) sheetStack.pop();
-      entrySheet(kind || 'spent');
+      entrySheet();
       break;
     case 'edit-entry':
-      entrySheet(undefined, id);
+      entrySheet(id);
       break;
     case 'delete-entry':
-      if (confirm('Delete this entry?')) {
+      if (confirm('Delete this saving?')) {
         state.entries = state.entries.filter((e) => e.id !== id);
         closeSheet();
-        commit('Entry deleted');
+        commit('Saving deleted');
+      }
+      break;
+    case 'edit-goal':
+      if (btn.dataset.replace) sheetStack.pop();
+      goalSheet();
+      break;
+    case 'delete-goal':
+      if (confirm('Remove your savings goal?\n\nYour savings stay — only the goal is removed.')) {
+        state.goal = null;
+        lastBarWidth.delete('goal');
+        closeSheet();
+        commit('Goal removed');
       }
       break;
     case 'add-debt':
@@ -1227,11 +1449,13 @@ document.addEventListener('click', (ev) => {
       break;
     case 'load-sample':
       state = sampleState(state.settings.currency);
+      lastBarWidth.clear();
       commit('Sample data added — erase it any time in Settings');
       break;
     case 'erase':
-      if (confirm('Erase all your entries and debts on this device?\n\nThis cannot be undone. Save a backup first if you might need it.')) {
-        state = { ...state, entries: [], debts: [] };
+      if (confirm('Erase all your savings, debts and your goal on this device?\n\nThis cannot be undone. Save a backup first if you might need it.')) {
+        state = { ...state, entries: [], debts: [], goal: null };
+        lastBarWidth.clear();
         commit('All data erased');
       }
       break;
@@ -1246,9 +1470,9 @@ document.addEventListener('click', (ev) => {
 });
 
 document.addEventListener('input', (ev) => {
-  if (ev.target.id === 'activitySearch') {
-    ui.activitySearch = ev.target.value;
-    renderActivityList();
+  if (ev.target.id === 'savingsSearch') {
+    ui.search = ev.target.value;
+    renderSavingsList();
   }
 });
 
@@ -1271,6 +1495,12 @@ document.addEventListener('toggle', (ev) => {
   if (ev.target.id === 'settledList') ui.showSettled = ev.target.open;
 }, true);
 
+// Back/forward (the app's Back button, the browser, or a swipe).
+window.addEventListener('popstate', () => {
+  closeAllSheets();
+  render();
+  window.scrollTo(0, 0);
+});
 window.addEventListener('hashchange', () => {
   render();
   window.scrollTo(0, 0);
@@ -1298,7 +1528,7 @@ window.addEventListener('resize', () => {
   lastWidth = window.innerWidth;
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    if (currentTab() === 'insights') render();
+    if (currentTab() === 'insights' || currentTab() === 'today') render();
   }, 150);
 });
 
@@ -1312,6 +1542,7 @@ document.addEventListener('pointerdown', (ev) => {
 
 // ---------- Start ----------
 
+if (location.hash === '#activity') history.replaceState(history.state, '', '#savings');
 applyTheme();
 render();
 

@@ -1,7 +1,7 @@
 {
   "name": "MoneyTrack",
   "short_name": "MoneyTrack",
-  "description": "Track what you spend and save each day, and who you owe or who owes you.",
+  "description": "Track your savings, a savings goal, and who you owe or who owes you.",
   "start_url": "./#today",
   "scope": "./",
   "display": "standalone",

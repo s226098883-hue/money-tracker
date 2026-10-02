@@ -1,4 +1,4 @@
-// Small hand-made SVG charts: thin columns, hover/tap tooltips, legend, and a table view.
+// Small hand-made SVG charts: thin columns, hover/tap tooltips, and a table view.
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -34,24 +34,12 @@ export function niceTicks(max, count = 4) {
   return { ticks, top };
 }
 
-export function legend(series) {
-  const wrap = el('div', 'legend');
-  for (const s of series) {
-    const item = el('span', 'legend-item');
-    const key = el('span', 'legend-key');
-    key.style.background = s.color;
-    item.append(key, document.createTextNode(s.label));
-    wrap.append(item);
-  }
-  return wrap;
-}
-
 /**
  * Grouped column chart.
  * points: [{ tick: 'Mon', title: 'Monday 28 Sep', values: { spent: 12, saved: 0 } }]
  * series: [{ key: 'spent', label: 'Spent', color: 'var(--spent)' }]
  */
-export function columnChart(container, { points, series, format, formatAxis, labelEvery = 1, ariaLabel }) {
+export function columnChart(container, { points, series, format, formatAxis, labelEvery = 1, ariaLabel, plotHeight = 170 }) {
   container.textContent = '';
   container.classList.add('chart');
 
@@ -59,7 +47,7 @@ export function columnChart(container, { points, series, format, formatAxis, lab
   const padL = 46;
   const padR = 6;
   const padT = 10;
-  const plotH = 170;
+  const plotH = plotHeight;
   const axisH = 26;
   const height = padT + plotH + axisH;
   const innerW = width - padL - padR;
@@ -178,32 +166,4 @@ export function chartTable(container, { columns, rows }) {
   }
   table.append(thead, tbody);
   container.append(table);
-}
-
-/**
- * Horizontal bars for one series (spending by category). Value sits at the bar's tip.
- * items: [{ label, emoji, value }]
- */
-export function hBars(container, { items, format, color }) {
-  container.textContent = '';
-  const max = Math.max(...items.map((i) => i.value), 0);
-  const total = items.reduce((s, i) => s + i.value, 0);
-  const list = el('div', 'hbars');
-  for (const item of items) {
-    const row = el('div', 'hbar-row');
-    const label = el('div', 'hbar-label');
-    label.append(el('span', 'hbar-emoji', item.emoji), el('span', 'hbar-name', item.label));
-    const track = el('div', 'hbar-track');
-    const fill = el('div', 'hbar-fill');
-    // Leave room after the longest bar for its value label.
-    fill.style.width = `calc((100% - 92px) * ${max ? item.value / max : 0})`;
-    fill.style.background = color;
-    const share = total ? (item.value / total) * 100 : 0;
-    const pct = share > 0 && share < 1 ? '<1' : String(Math.round(share));
-    const value = el('span', 'hbar-value', `${format(item.value)} · ${pct}%`);
-    track.append(fill, value);
-    row.append(label, track);
-    list.append(row);
-  }
-  container.append(list);
 }

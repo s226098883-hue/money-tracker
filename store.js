@@ -1,7 +1,7 @@
 // Data, saving, and small helpers. Everything is stored in this browser (localStorage).
 
 export const STORAGE_KEY = 'moneytrack.v1';
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.1.0';
 
 export const CATEGORIES = [
   { id: 'food', name: 'Food & Drink', emoji: '🍔' },
@@ -32,7 +32,7 @@ function defaultSettings() {
 }
 
 function emptyState() {
-  return { version: 1, entries: [], debts: [], settings: defaultSettings() };
+  return { version: 1, entries: [], debts: [], goal: null, settings: defaultSettings() };
 }
 
 const num = (v) => {
@@ -84,13 +84,25 @@ export function normalise(data) {
       createdAt: num(d.createdAt) || Date.now(),
     }));
 
+  const g = data.goal && typeof data.goal === 'object' ? data.goal : null;
+  const goal = g && num(g.target) > 0 && isISODate(g.dueDate)
+    ? {
+      name: String(g.name || '').slice(0, 60),
+      target: round2(Math.abs(num(g.target))),
+      dueDate: g.dueDate,
+      startDate: isISODate(g.startDate) ? g.startDate : todayISO(),
+      alreadySaved: round2(Math.abs(num(g.alreadySaved))),
+      createdAt: num(g.createdAt) || Date.now(),
+    }
+    : null;
+
   const s = data.settings && typeof data.settings === 'object' ? data.settings : {};
   const settings = {
     currency: CURRENCIES.includes(s.currency) || /^[A-Z]{3}$/.test(s.currency || '') ? s.currency : base.settings.currency,
     remindDays: [1, 3, 7, 14, 30].includes(Number(s.remindDays)) ? Number(s.remindDays) : 7,
     theme: ['system', 'light', 'dark'].includes(s.theme) ? s.theme : 'system',
   };
-  return { version: 1, entries, debts, settings };
+  return { version: 1, entries, debts, goal, settings };
 }
 
 export let storageWorks = true;
@@ -190,6 +202,12 @@ export function addDays(iso, n) {
 }
 export const daysBetween = (fromIso, toIso) => Math.round((fromISO(toIso) - fromISO(fromIso)) / 86400000);
 export const monthOf = (iso) => iso.slice(0, 7);
+/** Monday of the week that contains `iso`. */
+export function weekStart(iso) {
+  const d = fromISO(iso);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return toISO(d);
+}
 export function addMonths(ym, n) {
   let y = Number(ym.slice(0, 4));
   let m = Number(ym.slice(5, 7)) + n;
@@ -243,36 +261,20 @@ export function dueInfo(debt) {
   return { next, days, text, level: days < 0 ? 'overdue' : days <= 1 ? 'soon' : 'later' };
 }
 
-// ---------- Sample data (Settings → "Try with sample data") ----------
+// ---------- Sample data (Settings → "Try it with sample data") ----------
 
 export function sampleState(currency) {
   const t = todayISO();
-  const e = (daysAgo, kind, amount, category, note = '') => ({
-    id: uid(), kind, amount, date: addDays(t, -daysAgo), category, note, createdAt: Date.now() - daysAgo * 86400000,
+  const saved = (daysAgo, amount, note = '') => ({
+    id: uid(), kind: 'saved', amount, date: addDays(t, -daysAgo), category: 'other', note, createdAt: Date.now() - daysAgo * 86400000,
   });
   const entries = [
-    e(0, 'spent', 14.5, 'food', 'Lunch'),
-    e(0, 'saved', 20, 'other'),
-    e(1, 'spent', 62.3, 'groceries'),
-    e(1, 'spent', 4.6, 'transport', 'Myki top-up'),
-    e(2, 'spent', 18, 'fun', 'Movie'),
-    e(2, 'saved', 50, 'other', 'Emergency fund'),
-    e(3, 'spent', 9.9, 'food', 'Coffee + snack'),
-    e(4, 'spent', 120, 'bills', 'Phone + internet'),
-    e(5, 'spent', 35, 'shopping'),
-    e(5, 'saved', 25, 'other'),
-    e(6, 'spent', 22, 'food', 'Dinner with friends'),
-    e(9, 'spent', 450, 'rent', 'Rent'),
-    e(12, 'saved', 100, 'other', 'Pay day savings'),
-    e(16, 'spent', 75, 'study', 'Textbook'),
-    e(24, 'spent', 48, 'health'),
-    e(33, 'spent', 450, 'rent', 'Rent'),
-    e(35, 'saved', 150, 'other'),
-    e(40, 'spent', 210, 'groceries'),
-    e(62, 'spent', 380, 'travel', 'Weekend trip'),
-    e(64, 'saved', 120, 'other'),
-    e(95, 'spent', 160, 'gifts'),
-    e(97, 'saved', 200, 'other'),
+    saved(0, 20), saved(1, 15, 'Coffee money I skipped'), saved(2, 50, 'Emergency fund'), saved(4, 25),
+    saved(6, 40), saved(8, 30), saved(9, 100, 'Pay day'), saved(12, 20), saved(15, 35), saved(19, 60),
+    saved(23, 100, 'Pay day'), saved(27, 25), saved(33, 45), saved(37, 100, 'Pay day'), saved(44, 30),
+    saved(51, 100, 'Pay day'), saved(58, 20), saved(65, 100, 'Pay day'), saved(72, 40), saved(79, 100, 'Pay day'),
+    saved(90, 55), saved(100, 100, 'Pay day'), saved(115, 70), saved(128, 100, 'Pay day'), saved(142, 35),
+    saved(156, 100, 'Pay day'), saved(170, 50),
   ];
   const debts = [
     {
@@ -300,5 +302,8 @@ export function sampleState(currency) {
       payments: [{ id: uid(), amount: 40, date: addDays(t, -8), note: 'Bank transfer' }], createdAt: Date.now(),
     },
   ];
-  return { version: 1, entries, debts, settings: { ...defaultSettings(), currency } };
+  const goal = {
+    name: 'New laptop', target: 2000, dueDate: addDays(t, 90), startDate: addDays(t, -60), alreadySaved: 200, createdAt: Date.now(),
+  };
+  return { version: 1, entries, debts, goal, settings: { ...defaultSettings(), currency } };
 }
