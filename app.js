@@ -2,13 +2,17 @@
 import {
   STORAGE_KEY, APP_VERSION, SAVED_EMOJI, CURRENCIES,
   loadState, saveState, normalise, askForPersistentStorage, sampleState, storageWorks,
+  emptyState, snapshot, stampChanges,
   uid, esc, round2, sanitizeAmount, parseAmount,
   todayISO, fromISO, addDays, daysBetween, monthOf, addMonths, weekStart,
   paidOf, remainingOf, progressOf, nextDue, dueInfo,
 } from './store.js';
 import { columnChart, chartTable } from './charts.js';
+import { createSync, newKeyURL, parseRepo, siteOwner, DEFAULT_REPO } from './sync.js';
 
 let state = loadState();
+// What was last saved — used to work out exactly what changed (for GitHub sync).
+let lastSnapshot = snapshot(state);
 
 const ui = {
   search: '',
@@ -28,6 +32,9 @@ const ICON = {
   alert: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4M12 17.5v.01"/></svg>',
   calendar: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></svg>',
   check: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>',
+  cloud: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10.5a4 4 0 0 0 .6-7.96A6 6 0 0 0 6.4 9.1 4.5 4.5 0 0 0 7 18z"/></svg>',
+  cloudOff: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10.5a4 4 0 0 0 1.6-.33M20.9 14.5a4 4 0 0 0-2.8-4.46A6 6 0 0 0 9 5.6M6.4 9.1A4.5 4.5 0 0 0 7 18"/><path d="m3 3 18 18"/></svg>',
+  sync: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.3 4.9L20 16"/><path d="M20 20v-4h-4"/></svg>',
   clock: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
   trash: '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13M9 7V4h6v3"/></svg>',
 };
@@ -118,12 +125,21 @@ function urgentDebts() {
   });
 }
 
-/** Everything the savings-goal panel needs. */
-function goalProgress() {
-  const g = state.goal;
+const findGoal = (id) => (id ? state.goals.find((g) => g.id === id) || null : null);
+/** The goal new savings count toward automatically (the one you chose). */
+const defaultGoal = () => findGoal(state.settings.defaultGoalId);
+const goalName = (g) => (g && g.name) || 'Savings goal';
+/** Default goal first, then the others by the date you want to reach them. */
+function goalsInOrder() {
+  const def = state.settings.defaultGoalId;
+  return [...state.goals].sort((a, b) => (a.id === def ? -1 : b.id === def ? 1 : a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0));
+}
+
+/** Everything a goal's progress bar needs. */
+function goalProgress(g) {
   if (!g) return null;
   const t = todayISO();
-  const saved = round2(g.alreadySaved + sumSaved(savings().filter((e) => e.date >= g.startDate)));
+  const saved = round2(g.alreadySaved + sumSaved(savings().filter((e) => e.goalId === g.id)));
   const remaining = Math.max(0, round2(g.target - saved));
   const pct = g.target > 0 ? Math.min(1, saved / g.target) : 0;
   const daysLeft = daysBetween(t, g.dueDate);
@@ -138,18 +154,110 @@ function goalProgress() {
   else if (daysLeft < 0) status = { level: 'overdue', icon: ICON.alert, text: `Target date passed ${-daysLeft} day${daysLeft === -1 ? '' : 's'} ago` };
   else if (saved + 0.005 >= expected) status = { level: 'good', icon: ICON.check, text: 'On track' };
   else status = { level: 'behind', icon: ICON.clock, text: `Behind plan by ${money(expected - saved)}` };
-  return { g, saved, remaining, pct, daysLeft, perWeek, reached, status };
+  let when;
+  if (reached) when = longDate(g.dueDate);
+  else if (daysLeft > 1) when = `${daysLeft} days left`;
+  else if (daysLeft === 1) when = '1 day left';
+  else if (daysLeft === 0) when = 'Due today';
+  else when = 'Date passed';
+  return { g, saved, remaining, pct, daysLeft, perWeek, reached, status, when };
 }
 
 // ---------- Save + re-render ----------
 
 function commit(message) {
+  stampChanges(lastSnapshot, state);
   const ok = saveState(state);
+  lastSnapshot = snapshot(state);
   render();
   if (!ok) toast("Couldn't save — this browser is blocking storage");
   else if (message) toast(message);
   askForPersistentStorage();
+  sync.soon();
 }
+
+/** Data merged from GitHub (or another tab) replaces what's on screen. */
+let renderWhenSheetCloses = false;
+function applyState(next) {
+  const before = state.settings;
+  state = next;
+  saveState(state);
+  lastSnapshot = snapshot(state);
+  if (before.currency !== state.settings.currency) fmtCache.clear();
+  if (before.theme !== state.settings.theme) applyTheme();
+  // Don't redraw under an open form (it would lose the cursor); redraw when it closes.
+  if (sheet.open) renderWhenSheetCloses = true;
+  else render();
+}
+
+// ---------- GitHub sync ----------
+
+const SYNC_PROBLEMS = ['auth', 'access', 'missing', 'public', 'newer', 'other'];
+let shownSyncKind = null;
+
+const sync = createSync({
+  getState: () => state,
+  applyState,
+  onStatus: (st) => {
+    const shownBefore = shownSyncKind;
+    updateSyncBits();
+    // Problems change the layout (a banner on Today, a key field in Settings) — redraw for those.
+    const problem = (k) => SYNC_PROBLEMS.includes(k) || k === 'off';
+    const tab = currentTab();
+    const typing = document.activeElement && document.activeElement.matches && document.activeElement.matches('input, select, textarea');
+    if (problem(st.kind) !== problem(shownBefore) && (tab === 'today' || tab === 'settings') && !sheet.open && !typing) render();
+  },
+});
+
+function timeAgo(ms) {
+  const sec = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (sec < 45) return 'just now';
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min} min ago`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `${h} h ago`;
+  return new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
+
+/** Short status text, e.g. "Saved to GitHub · just now". */
+function syncStatusHTML() {
+  const st = sync.status;
+  if (!sync.isOn()) return `${ICON.cloudOff}<span>Not backed up to GitHub yet</span>`;
+  if (st.kind === 'syncing') return `${ICON.sync}<span>Saving to GitHub…</span>`;
+  if (st.kind === 'ok') return `${ICON.check}<span>Saved to GitHub${st.lastSyncAt ? ` · ${esc(timeAgo(st.lastSyncAt))}` : ''}</span>`;
+  if (st.kind === 'offline') return `${ICON.cloudOff}<span>Offline — saved on this device, will upload later</span>`;
+  return `${ICON.alert}<span>Sync stopped — tap to fix</span>`;
+}
+
+function syncStatusClass() {
+  const k = sync.status.kind;
+  if (!sync.isOn()) return 'off';
+  if (k === 'ok') return 'ok';
+  if (k === 'syncing') return 'busy';
+  if (k === 'offline') return 'offline';
+  return 'problem';
+}
+
+function updateSyncBits() {
+  shownSyncKind = sync.isOn() ? sync.status.kind : 'off';
+  $$('[data-sync-status]').forEach((el) => {
+    el.innerHTML = syncStatusHTML();
+    el.className = `sync-line ${syncStatusClass()}`;
+  });
+  const detail = $('#syncDetail');
+  if (detail) detail.textContent = syncDetailText();
+}
+
+function syncDetailText() {
+  const st = sync.status;
+  if (st.kind === 'syncing') return 'Saving…';
+  if (st.kind === 'ok') return st.lastSyncAt ? `Saved ${timeAgo(st.lastSyncAt)}` : 'On';
+  if (st.kind === 'offline') return 'Waiting for internet';
+  return 'Stopped';
+}
+
+const syncLater = { until: 0 };
+try { syncLater.until = Number(localStorage.getItem('moneytrack.syncLater')) || 0; } catch { /* ignore */ }
 
 let toastTimer;
 function toast(message) {
@@ -225,6 +333,7 @@ function render() {
   else if (tab === 'insights') renderInsights(view);
   else renderSettings(view);
   $('#backSlot').innerHTML = backButton();
+  updateSyncBits();
   updateBadges();
   animateBars();
   // A sheet that is open shows live data (e.g. a debt's balance) — refresh it too.
@@ -283,7 +392,8 @@ function dueLabel(info) {
 
 function entryRow(e, showDate = false) {
   const title = e.note || 'Savings';
-  const sub = showDate ? dayTitle(e.date) : '';
+  const g = findGoal(e.goalId);
+  const sub = [showDate ? dayTitle(e.date) : '', g ? `🎯 ${goalName(g)}` : ''].filter(Boolean).join(' · ');
   return `<button class="row" data-action="edit-entry" data-id="${esc(e.id)}">
     <span class="emoji-badge saved" aria-hidden="true">${SAVED_EMOJI}</span>
     <span class="row-main"><span class="row-title">${esc(title)}</span>${sub ? `<span class="row-sub">${esc(sub)}</span>` : ''}</span>
@@ -335,43 +445,60 @@ function animateBars() {
   }));
 }
 
-function goalCard() {
-  const p = goalProgress();
-  if (!p) {
+function goalBar(p, key, label) {
+  const width = `${(p.pct * 100).toFixed(1)}%`;
+  const from = lastBarWidth.get(key) || '0%';
+  return `<div class="goal-bar" role="progressbar" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(p.pct * 100)}">
+      <span data-fill="${width}" data-key="${esc(key)}" style="width:${from}"></span>
+    </div>`;
+}
+
+function goalsPanel() {
+  if (!state.goals.length) {
     return `<section class="card goal-card">
       <div class="goal-empty">
         <span class="emoji-badge saved" aria-hidden="true">🎯</span>
-        <span><strong>Set a savings goal</strong><small>Choose a target and a date, then watch the bar fill up as you save.</small></span>
+        <span><strong>Set a savings goal</strong><small>Choose a target and a date, then watch the bar fill up as you save. You can have more than one.</small></span>
       </div>
-      <button class="btn btn-saved" data-action="edit-goal">${ICON.plus}Set a goal</button>
+      <button class="btn btn-saved" data-action="new-goal">${ICON.plus}Set a goal</button>
     </section>`;
   }
-  const { g, saved, remaining, pct, daysLeft, perWeek, reached, status } = p;
-  const pctText = `${Math.floor(pct * 100)}%`;
-  const width = `${(pct * 100).toFixed(1)}%`;
-  const start = lastBarWidth.get('goal') || '0%';
-  let when;
-  if (reached) when = longDate(g.dueDate);
-  else if (daysLeft > 1) when = `${daysLeft} days left`;
-  else if (daysLeft === 1) when = '1 day left';
-  else if (daysLeft === 0) when = 'Due today';
-  else when = 'Date passed';
-  return `<section class="card goal-card" aria-label="Savings goal">
-    <div class="card-head"><h2>🎯 ${esc(g.name || 'Savings goal')}</h2><button class="link-btn" data-action="edit-goal">Edit</button></div>
-    <div class="goal-amounts"><span class="goal-saved">${esc(money(saved))}</span><span class="muted">saved of ${esc(money(g.target))}</span></div>
+  const [main, ...others] = goalsInOrder();
+  const p = goalProgress(main);
+  const isAuto = main.id === state.settings.defaultGoalId;
+  const big = `<section class="card goal-card" aria-label="Savings goal: ${esc(goalName(main))}">
+    <div class="card-head"><h2>🎯 ${esc(goalName(main))}</h2><button class="link-btn" data-action="edit-goal" data-id="${esc(main.id)}">Edit</button></div>
+    ${isAuto ? `<p class="auto-chip">${ICON.check}New savings go here</p>` : ''}
+    <div class="goal-amounts"><span class="goal-saved">${esc(money(p.saved))}</span><span class="muted">saved of ${esc(money(main.target))}</span></div>
     <div class="goal-progress">
-      <div class="goal-bar" role="progressbar" aria-label="Goal progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct * 100)}">
-        <span data-fill="${width}" data-key="goal" style="width:${start}"></span>
-      </div>
-      <span class="goal-pct">${pctText}</span>
+      ${goalBar(p, `goal-${main.id}`, 'Goal progress')}
+      <span class="goal-pct">${Math.floor(p.pct * 100)}%</span>
     </div>
     <div class="goal-facts">
-      ${reached ? textTile('Target', money(g.target)) : textTile('Still needed', money(remaining))}
-      ${textTile(`By ${shortDate(g.dueDate)}`, when)}
-      ${reached || daysLeft < 0 ? '' : textTile('Per week', money(perWeek))}
+      ${p.reached ? textTile('Target', money(main.target)) : textTile('Still needed', money(p.remaining))}
+      ${textTile(`By ${shortDate(main.dueDate)}`, p.when)}
+      ${p.reached || p.daysLeft < 0 ? '' : textTile('Per week', money(p.perWeek))}
     </div>
-    <p class="goal-status ${status.level}">${status.icon}${esc(status.text)}</p>
+    <p class="goal-status ${p.status.level}">${p.status.icon}${esc(p.status.text)}</p>
+    ${others.length ? '' : `<button class="link-btn add-goal-link" data-action="new-goal">${ICON.plus}Add another goal</button>`}
   </section>`;
+  if (!others.length) return big;
+  return `${big}
+    <section class="card" aria-label="Other goals">
+      ${cardHead('Other goals', '+ New goal', 'new-goal')}
+      <div class="rows">${others.map(goalMiniRow).join('')}</div>
+    </section>`;
+}
+
+function goalMiniRow(g) {
+  const p = goalProgress(g);
+  return `<button class="row goal-row" data-action="edit-goal" data-id="${esc(g.id)}">
+    <span class="row-main">
+      <span class="goal-row-top"><span class="row-title">${esc(goalName(g))}</span><span class="row-amount">${Math.floor(p.pct * 100)}%</span></span>
+      ${goalBar(p, `goal-${g.id}`, `${goalName(g)} progress`)}
+      <span class="row-sub">${esc(money(p.saved))} of ${esc(money(g.target))} · ${esc(p.reached ? 'Reached' : p.when)}</span>
+    </span>
+  </button>`;
 }
 
 function debtGroup(title, list) {
@@ -389,7 +516,6 @@ function renderToday(view) {
   const t = todayISO();
   const wk = weekStart(t);
   const all = savings();
-  const todaySaved = savedBetween(t, t);
   const weekSaved = savedBetween(wk, t);
   const daysSoFar = daysBetween(wk, t) + 1;
   const monthSaved = savedBetween(`${monthOf(t)}-01`, t);
@@ -399,9 +525,9 @@ function renderToday(view) {
   const iOwe = iOweList.reduce((s, d) => s + remainingOf(d), 0);
   const owed = owedList.reduce((s, d) => s + remainingOf(d), 0);
   const upcoming = upcomingDebts();
-  const recent = sortedSavings().slice(0, 5);
 
-  setHeader('Today', fmtDate(t, { weekday: 'long', day: 'numeric', month: 'long' }), addButton('add-menu', 'Add'));
+  // The + button adds a saving straight away.
+  setHeader('Today', fmtDate(t, { weekday: 'long', day: 'numeric', month: 'long' }), addButton('add-entry', 'Add saving'));
 
   let banner = '';
   if (upcoming.length) {
@@ -417,20 +543,34 @@ function renderToday(view) {
     </button>`;
   }
 
-  view.innerHTML = `
-    ${storageNotice()}
-    ${goalCard()}
-    ${banner}
-    <section class="card" aria-label="Today">
-      <div class="tiles">
-        ${tile('Saved today', todaySaved, 'var(--saved)', true)}
-        ${tile('Saved all-time', sumSaved(all), '', true)}
+  const isEmpty = !all.length && !state.debts.length && !state.goals.length;
+  let syncCard = '';
+  if (!sync.isOn() && (isEmpty || Date.now() > syncLater.until)) {
+    syncCard = `<section class="card sync-card">
+      <div class="goal-empty">
+        <span class="emoji-badge owedToMe" aria-hidden="true">☁️</span>
+        <span>${isEmpty
+    ? '<strong>Lost your data?</strong><small>If you turned on GitHub sync before, connect this device to bring everything back.</small>'
+    : '<strong>Keep your data safe</strong><small>Save a copy to your private GitHub, so nothing is lost when the browser forgets it — and it matches on your iPhone and Mac.</small>'}</span>
       </div>
       <div class="btn-row">
-        <button class="btn btn-saved" data-action="add-entry">${ICON.plus}Add saving</button>
-        <button class="btn btn-secondary" data-action="add-debt">${ICON.plus}Debt / loan</button>
+        <button class="btn btn-primary" data-action="goto" data-arg="settings">Turn on sync</button>
+        ${isEmpty ? '' : '<button class="btn btn-secondary" data-action="sync-later">Later</button>'}
       </div>
-    </section>
+    </section>`;
+  } else if (sync.isOn() && SYNC_PROBLEMS.includes(sync.status.kind)) {
+    syncCard = `<button class="alert-banner" data-action="goto" data-arg="settings">
+      <span class="lead">${ICON.alert}</span>
+      <span class="grow"><strong>GitHub sync stopped</strong><small>${esc(sync.status.message)}</small></span>
+      ${ICON.chevron}
+    </button>`;
+  }
+
+  view.innerHTML = `
+    ${storageNotice()}
+    ${syncCard}
+    ${goalsPanel()}
+    ${banner}
 
     <section class="card">
       ${cardHead(`This week · ${shortDate(wk)} – ${shortDate(addDays(wk, 6))}`, 'Insights', 'goto', 'insights')}
@@ -444,6 +584,7 @@ function renderToday(view) {
         ${tile('Saved this month', monthSaved)}
         ${textTile('Days saved', `${new Set(all.filter((e) => e.date >= wk && e.date <= t).map((e) => e.date)).size} of ${daysSoFar}`)}
       </div>
+      ${all.length ? '' : '<p class="muted small" style="margin-top:12px">Nothing saved yet. Tap <b>+</b> at the top to log your first saving.</p>'}
     </section>
 
     <section class="card">
@@ -454,15 +595,10 @@ function renderToday(view) {
       </div>
       ${open.length
         ? `${debtGroup('I need to pay', iOweList)}${debtGroup('Owes me', owedList)}`
-        : '<p class="muted small" style="margin-top:12px">Nothing open. Tap + to add a loan, money you borrowed, or money you lent.</p>'}
+        : '<p class="muted small" style="margin-top:12px">Nothing open right now.</p>'}
+      <button class="btn btn-secondary" style="margin-top:14px" data-action="add-debt">${ICON.plus}Add debt or loan</button>
     </section>
-
-    <section class="card">
-      ${cardHead('Recent savings', recent.length ? 'See all' : '', 'goto', 'savings')}
-      ${recent.length
-        ? `<div class="rows">${recent.map((e) => entryRow(e, true)).join('')}</div>`
-        : '<p class="muted small">Nothing saved yet. Tap <b>Add saving</b> above to log your first one.</p>'}
-    </section>`;
+    ${sync.isOn() ? '<button class="sync-line" data-sync-status data-action="goto" data-arg="settings"></button>' : ''}`;
 
   // Mon–Sun mini chart for this week.
   const points = [];
@@ -651,6 +787,53 @@ function renderInsights(view) {
 
 // ---------- Settings ----------
 
+function syncSection() {
+  const owner = siteOwner();
+  const cfg = sync.config;
+  const st = sync.status;
+  const repoText = cfg ? `${cfg.owner}/${cfg.repo}` : owner ? `${owner}/${DEFAULT_REPO}` : DEFAULT_REPO;
+  const needsKey = !cfg || ['auth', 'access', 'missing', 'public'].includes(st.kind);
+
+  const keyForm = `
+      <form id="syncForm" class="sync-form" novalidate>
+        <div class="card form-list">
+          <label class="field${cfg ? ' visually-hidden' : ''}"><span>Repository</span><input type="text" name="repo" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" value="${esc(repoText)}" ${cfg ? 'tabindex="-1" aria-hidden="true"' : ''}></label>
+          <label class="field"><span>Access key</span><input type="password" name="token" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Paste it here"></label>
+        </div>
+        <p class="field-error" id="syncError" hidden></p>
+        <button class="btn btn-primary" type="submit" id="syncConnect">${ICON.cloud}${cfg ? 'Save new key' : 'Connect'}</button>
+      </form>`;
+
+  if (!cfg) {
+    return `<section id="sync">
+      <h2 class="group-title">GitHub sync</h2>
+      <div class="card sync-intro">
+        <p>Save your data to a private file in your own GitHub account. It's never lost — even if this browser forgets everything or you delete the Home Screen icon — and it stays the same on your iPhone and Mac.</p>
+        <ol class="steps">
+          <li><a class="text-link" href="${esc(newKeyURL(owner))}" target="_blank" rel="noopener">Make an access key on GitHub</a>. Under <b>Repository access</b>, pick <b>Only select repositories</b> → <b>${esc(DEFAULT_REPO)}</b>. Then tap <b>Generate token</b> and copy the key.</li>
+          <li>Paste the key below and tap <b>Connect</b>.</li>
+        </ol>
+      </div>
+      ${keyForm}
+      <p class="footnote">The key only opens that one private repository and stays on this device. Keep a copy in your Passwords app or Notes — you'll paste it once on each device or browser you use.</p>
+    </section>`;
+  }
+
+  const problem = SYNC_PROBLEMS.includes(st.kind);
+  return `<section id="sync">
+    <h2 class="group-title">GitHub sync</h2>
+    <div class="card form-list">
+      <div class="field"><span>Status</span><span class="kv-value ${problem ? 'bad' : ''}" id="syncDetail">${esc(syncDetailText())}</span></div>
+      <div class="field"><span>Repository</span><a class="kv-value text-link" href="https://github.com/${esc(cfg.owner)}/${esc(cfg.repo)}/commits" target="_blank" rel="noopener">${esc(`${cfg.owner}/${cfg.repo}`)}</a></div>
+      <button class="list-btn" data-action="sync-now">Sync now</button>
+      <button class="list-btn danger" data-action="sync-off">Turn off sync on this device</button>
+    </div>
+    ${problem ? `<p class="sync-problem" role="alert">${ICON.alert}<span>${esc(st.message)}</span></p>` : ''}
+    ${problem && needsKey ? `<p class="footnote" style="margin-bottom:8px"><a class="text-link" href="${esc(newKeyURL(cfg.owner))}" target="_blank" rel="noopener">Make a new access key</a> (pick <b>Only select repositories</b> → <b>${esc(cfg.repo)}</b>), then paste it here.</p>${keyForm}` : ''}
+    <p class="footnote">Every change is saved to GitHub a few seconds after you make it. GitHub also keeps every earlier version, so you can always go back.</p>
+  </section>`;
+}
+
 function renderSettings(view) {
   setHeader('Settings');
   const s = state.settings;
@@ -662,7 +845,7 @@ function renderSettings(view) {
       return code;
     }
   };
-  const isEmpty = !savings().length && !state.debts.length && !state.goal;
+  const isEmpty = !savings().length && !state.debts.length && !state.goals.length;
   const canBadge = 'setAppBadge' in navigator && 'Notification' in window;
   let badgeRow = '';
   if (canBadge) {
@@ -675,6 +858,7 @@ function renderSettings(view) {
 
   view.innerHTML = `
     ${storageNotice()}
+    ${syncSection()}
     <section>
       <h2 class="group-title">General</h2>
       <div class="card form-list">
@@ -688,8 +872,16 @@ function renderSettings(view) {
             <option value="dark" ${s.theme === 'dark' ? 'selected' : ''}>Dark</option>
           </select>
         </label>
-        <button class="list-btn" data-action="edit-goal">${state.goal ? 'Edit savings goal' : 'Set a savings goal'}</button>
       </div>
+    </section>
+
+    <section>
+      <h2 class="group-title">Savings goals</h2>
+      <div class="card form-list">
+        ${goalsInOrder().map((g) => `<button class="list-btn goal-list-btn" data-action="edit-goal" data-id="${esc(g.id)}"><span>${esc(goalName(g))}</span>${g.id === s.defaultGoalId ? '<span class="tag">New savings go here</span>' : `<span class="kv-value">${esc(money(g.target))}</span>`}</button>`).join('')}
+        <button class="list-btn" data-action="new-goal">${state.goals.length ? 'Add another goal' : 'Set a savings goal'}</button>
+      </div>
+      ${state.goals.length > 1 ? '<p class="footnote">To change which goal new savings go to, open a goal and turn on <b>New savings go here</b>.</p>' : ''}
     </section>
 
     <section>
@@ -712,10 +904,12 @@ function renderSettings(view) {
         <label class="list-btn" for="importFile">Restore from a backup file</label>
         <input type="file" id="importFile" class="visually-hidden" accept="application/json,.json">
         <button class="list-btn" data-action="export-csv">Export to a spreadsheet (CSV)</button>
-        ${isEmpty ? '<button class="list-btn" data-action="load-sample">Try it with sample data</button>' : ''}
+        ${isEmpty && !sync.isOn() ? '<button class="list-btn" data-action="load-sample">Try it with sample data</button>' : ''}
         <button class="list-btn danger" data-action="erase">Erase all data</button>
       </div>
-      <p class="footnote">Your money data is saved only on this device, in this browser. It is never uploaded — not even to GitHub. Save a backup now and then, and use it to move your data to another phone or computer.</p>
+      <p class="footnote">${sync.isOn()
+    ? 'Your data is saved in this browser and in your private GitHub repository. A backup file is an extra copy you can keep anywhere.'
+    : 'Right now your data is saved only in this browser. Turn on GitHub sync above so it can never be lost, or save a backup file now and then.'}</p>
     </section>
 
     <section>
@@ -775,6 +969,10 @@ sheet.addEventListener('close', () => {
   sheetStack = [];
   sheet.innerHTML = '';
   document.documentElement.classList.remove('sheet-open');
+  if (renderWhenSheetCloses) {
+    renderWhenSheetCloses = false;
+    render();
+  }
 });
 sheet.addEventListener('cancel', (e) => {
   e.preventDefault();
@@ -828,20 +1026,6 @@ function bindFormSeg(root, name, onChange) {
   }));
 }
 
-// Add menu
-function addMenuSheet() {
-  openSheet((root) => {
-    root.innerHTML = `${sheetHead('Add', { cancel: 'Close' })}
-      <div class="sheet-body">
-        <div class="choice-list">
-          <button class="choice" data-action="add-entry" data-replace="1"><span class="emoji-badge saved" aria-hidden="true">💰</span><span><b>Saving</b><small>Money you put aside</small></span></button>
-          <button class="choice" data-action="add-debt" data-replace="1"><span class="emoji-badge iOwe" aria-hidden="true">🤝</span><span><b>Debt or loan</b><small>Money you owe, or money someone owes you</small></span></button>
-          <button class="choice" data-action="edit-goal" data-replace="1"><span class="emoji-badge owedToMe" aria-hidden="true">🎯</span><span><b>Savings goal</b><small>${state.goal ? 'Change your target or date' : 'Set a target and a date to reach it'}</small></span></button>
-        </div>
-      </div>`;
-  });
-}
-
 // Saving entry
 function entrySheet(id = null) {
   const existing = id ? state.entries.find((e) => e.id === id) : null;
@@ -849,22 +1033,37 @@ function entrySheet(id = null) {
     amount: existing ? String(existing.amount) : '',
     date: existing ? existing.date : todayISO(),
     note: existing ? existing.note : '',
+    // New savings count toward the goal you chose; an edited saving keeps its own goal.
+    goalId: existing ? (findGoal(existing.goalId) ? existing.goalId : '') : (defaultGoal() ? defaultGoal().id : ''),
+  };
+
+  const goalHint = () => {
+    const p = goalProgress(findGoal(f.goalId));
+    if (!p) return state.goals.length ? "This saving won't count toward a goal." : '';
+    return p.reached
+      ? `Counts toward <b>${esc(goalName(p.g))}</b> — already reached 🎉`
+      : `Counts toward <b>${esc(goalName(p.g))}</b> — ${esc(money(p.remaining))} to go.`;
   };
 
   openSheet((root) => {
-    const p = goalProgress();
-    const goalHint = p && !p.reached
-      ? `<p class="footnote">Savings dated from ${esc(shortDate(p.g.startDate))} count toward <b>${esc(p.g.name || 'your goal')}</b> — ${esc(money(p.remaining))} to go.</p>`
+    const goalField = state.goals.length
+      ? `<label class="field"><span>Goal</span>
+          <select name="goalId">
+            ${goalsInOrder().map((g) => `<option value="${esc(g.id)}" ${g.id === f.goalId ? 'selected' : ''}>${esc(goalName(g))}</option>`).join('')}
+            <option value="" ${f.goalId ? '' : 'selected'}>No goal</option>
+          </select>
+        </label>`
       : '';
     root.innerHTML = `
       ${sheetHead(existing ? 'Edit saving' : 'New saving', { save: 'entryForm' })}
       <form id="entryForm" class="sheet-body" novalidate autocomplete="off">
         ${amountField(f.amount, !existing)}
         <div class="card form-list">
+          ${goalField}
           <label class="field"><span>Date</span><input type="date" name="date" value="${esc(f.date)}" required></label>
-          <label class="field"><span>Note</span><input type="text" name="note" maxlength="80" value="${esc(f.note)}" placeholder="e.g. Emergency fund"></label>
+          <label class="field"><span>Note</span><input type="text" name="note" maxlength="80" value="${esc(f.note)}" placeholder="e.g. Pay day"></label>
         </div>
-        ${goalHint}
+        <p class="footnote" id="goalHint">${goalHint()}</p>
         ${existing ? `<button type="button" class="btn btn-danger-outline" data-action="delete-entry" data-id="${esc(existing.id)}">${ICON.trash}Delete saving</button>` : ''}
       </form>`;
 
@@ -876,6 +1075,12 @@ function entrySheet(id = null) {
       f.date = form.date.value || f.date;
       f.note = form.note.value;
     });
+    if (form.goalId) {
+      form.goalId.addEventListener('change', () => {
+        f.goalId = form.goalId.value;
+        $('#goalHint', root).innerHTML = goalHint();
+      });
+    }
     form.addEventListener('submit', (ev) => {
       ev.preventDefault();
       const amount = parseAmount($('#amt', root).value);
@@ -884,51 +1089,62 @@ function entrySheet(id = null) {
         $('#amt', root).focus();
         return;
       }
-      const before = goalProgress();
+      const goal = findGoal(form.goalId ? form.goalId.value : '');
+      const before = goalProgress(goal);
       const record = {
         kind: 'saved',
         amount,
         date: form.date.value || todayISO(),
         category: 'other',
         note: form.note.value.trim().slice(0, 80),
+        goalId: goal ? goal.id : null,
       };
-      if (existing) Object.assign(existing, record);
+      // Look the saving up again: sync may have refreshed the data while this form was open.
+      const current = existing && state.entries.find((e) => e.id === existing.id);
+      if (current) Object.assign(current, record);
+      else if (existing) state.entries.push({ ...existing, ...record });
       else state.entries.push({ id: uid(), createdAt: Date.now(), ...record });
-      const after = goalProgress();
+      const after = goalProgress(goal);
       closeSheet();
-      if (before && after && !before.reached && after.reached) commit('Goal reached — well done! 🎉');
-      else commit(existing ? 'Saving updated' : `Saved ${money(amount)}`);
+      if (before && after && !before.reached && after.reached) commit(`${goalName(goal)} reached — well done! 🎉`);
+      else if (existing) commit('Saving updated');
+      else commit(goal ? `Saved ${money(amount)} toward ${goalName(goal)}` : `Saved ${money(amount)}`);
     });
   });
 }
 
-// Savings goal
-function goalSheet() {
-  const g = state.goal;
+// Savings goal (new or edit)
+function goalSheet(id = null) {
+  const g = findGoal(id);
+  const isDefault = g ? g.id === state.settings.defaultGoalId : !defaultGoal();
   const f = {
     name: g ? g.name : '',
     target: g ? String(g.target) : '',
     dueDate: g ? g.dueDate : addDays(todayISO(), 90),
     startDate: g ? g.startDate : todayISO(),
     already: g && g.alreadySaved ? String(g.alreadySaved) : '',
+    auto: isDefault,
   };
   openSheet((root) => {
+    const p = goalProgress(g);
     root.innerHTML = `
       ${sheetHead(g ? 'Edit goal' : 'New savings goal', { save: 'goalForm' })}
       <form id="goalForm" class="sheet-body" novalidate autocomplete="off">
         <div class="card form-list">
-          <label class="field"><span>Goal name</span><input type="text" name="name" maxlength="60" value="${esc(f.name)}" placeholder="e.g. New laptop"></label>
+          <label class="field"><span>Goal name</span><input type="text" name="name" maxlength="60" value="${esc(f.name)}" placeholder="e.g. New laptop" ${g ? '' : 'autofocus'}></label>
         </div>
         <h3 class="group-title" style="margin-bottom:-8px">Target amount</h3>
-        ${amountField(f.target, !g)}
+        ${amountField(f.target, false)}
         <div class="card form-list">
           <label class="field"><span>Reach it by</span><input type="date" name="dueDate" value="${esc(f.dueDate)}"></label>
-          <label class="field"><span>Count savings from</span><input type="date" name="startDate" value="${esc(f.startDate)}"></label>
+          <label class="field"><span>Start date</span><input type="date" name="startDate" value="${esc(f.startDate)}"></label>
           <label class="field"><span>Already saved</span><input type="text" name="already" inputmode="decimal" maxlength="12" value="${esc(f.already)}" placeholder="0"></label>
+          <label class="field"><span>New savings go here</span><input type="checkbox" role="switch" name="auto" ${f.auto ? 'checked' : ''}></label>
         </div>
-        <p class="footnote">Every saving you log from the “count savings from” date adds to this goal. Use “Already saved” for money you had put aside before that.</p>
+        <p class="footnote">With <b>New savings go here</b> on, every saving you add counts toward this goal automatically. Only one goal can have it — you can still pick another goal when you add a saving. “Already saved” is money you had put aside before you started.</p>
+        ${p ? `<p class="footnote"><b>${esc(money(p.saved))}</b> saved so far — ${esc(money(g.alreadySaved))} already saved + ${esc(money(round2(p.saved - g.alreadySaved)))} from savings linked to this goal.</p>` : ''}
         <p class="field-error" id="goalError" hidden></p>
-        ${g ? `<button type="button" class="btn btn-danger-outline" data-action="delete-goal">${ICON.trash}Remove goal</button>` : ''}
+        ${g ? `<button type="button" class="btn btn-danger-outline" data-action="delete-goal" data-id="${esc(g.id)}">${ICON.trash}Delete goal</button>` : ''}
       </form>`;
 
     const form = $('#goalForm', root);
@@ -942,6 +1158,7 @@ function goalSheet() {
       f.already = form.already.value;
       $('#goalError', root).hidden = true;
     });
+    form.auto.addEventListener('change', () => { f.auto = form.auto.checked; });
     form.addEventListener('submit', (ev) => {
       ev.preventDefault();
       const target = parseAmount($('#amt', root).value);
@@ -957,20 +1174,26 @@ function goalSheet() {
         return;
       }
       if (dueDate <= startDate) {
-        showError(root, 'goalError', 'The target date needs to be after the “count savings from” date.');
+        showError(root, 'goalError', 'The “reach it by” date needs to be after the start date.');
         return;
       }
-      state.goal = {
+      const record = {
         name: form.name.value.trim().slice(0, 60),
         target,
         dueDate,
         startDate,
         alreadySaved: parseAmount(form.already.value) || 0,
-        createdAt: g ? g.createdAt : Date.now(),
       };
-      lastBarWidth.delete('goal');
+      let goal = g && findGoal(g.id);
+      if (goal) Object.assign(goal, record);
+      else {
+        goal = { ...(g || {}), id: (g && g.id) || `goal-${uid()}`, createdAt: (g && g.createdAt) || Date.now(), ...record };
+        state.goals.push(goal);
+      }
+      if (form.auto.checked) state.settings.defaultGoalId = goal.id;
+      else if (state.settings.defaultGoalId === goal.id) state.settings.defaultGoalId = null;
       closeSheet();
-      commit(g ? 'Goal updated' : 'Goal set — good luck!');
+      commit(g ? 'Goal updated' : form.auto.checked && state.goals.length > 1 ? `${goalName(goal)} added — new savings go here` : 'Goal set — good luck!');
     });
   });
 }
@@ -1076,11 +1299,12 @@ function debtSheet(id = null, direction = ui.debtDirection) {
         monthly: hasDue && form.monthly.checked,
         note: form.note.value.trim().slice(0, 120),
       };
-      if (existing) {
-        Object.assign(existing, record);
-        if (existing.settled && remainingOf(existing) > 0) {
-          existing.settled = false;
-          existing.settledDate = null;
+      const current = existing && (findDebt(existing.id) || (state.debts.push({ ...existing }), findDebt(existing.id)));
+      if (current) {
+        Object.assign(current, record);
+        if (current.settled && remainingOf(current) > 0) {
+          current.settled = false;
+          current.settledDate = null;
         }
       } else {
         state.debts.push({ id: uid(), createdAt: Date.now(), settled: false, settledDate: null, payments: [], ...record });
@@ -1242,14 +1466,16 @@ function csvCell(v) {
 }
 
 function exportCSV() {
-  const rows = [['Savings'], ['Date', 'Amount', 'Currency', 'Note']];
-  for (const e of sortedSavings()) rows.push([e.date, e.amount.toFixed(2), state.settings.currency, e.note]);
-  if (state.goal) {
-    const p = goalProgress();
+  const rows = [['Savings'], ['Date', 'Amount', 'Currency', 'Goal', 'Note']];
+  for (const e of sortedSavings()) rows.push([e.date, e.amount.toFixed(2), state.settings.currency, findGoal(e.goalId) ? goalName(findGoal(e.goalId)) : '', e.note]);
+  if (state.goals.length) {
     rows.push([]);
-    rows.push(['Savings goal']);
-    rows.push(['Name', 'Target', 'Saved so far', 'Still needed', 'Reach it by']);
-    rows.push([state.goal.name, state.goal.target.toFixed(2), p.saved.toFixed(2), p.remaining.toFixed(2), state.goal.dueDate]);
+    rows.push(['Savings goals']);
+    rows.push(['Name', 'Target', 'Saved so far', 'Still needed', 'Reach it by', 'New savings go here']);
+    for (const g of goalsInOrder()) {
+      const p = goalProgress(g);
+      rows.push([goalName(g), g.target.toFixed(2), p.saved.toFixed(2), p.remaining.toFixed(2), g.dueDate, g.id === state.settings.defaultGoalId ? 'Yes' : '']);
+    }
   }
   rows.push([]);
   rows.push(['Debts & loans']);
@@ -1271,9 +1497,12 @@ async function importBackup(file) {
     if (!parsed || (!Array.isArray(parsed.entries) && !Array.isArray(parsed.debts))) throw new Error('not a backup');
     const data = normalise(parsed);
     const savedCount = data.entries.filter((e) => e.kind === 'saved').length;
-    const ok = confirm(`Replace everything on this device with this backup?\n\n${savedCount} savings and ${data.debts.length} debts will be restored.`);
+    const where = sync.isOn() ? 'on this device and in GitHub sync' : 'on this device';
+    const ok = confirm(`Replace everything ${where} with this backup?\n\n${savedCount} savings and ${data.debts.length} debts will be restored.`);
     if (!ok) return;
-    state = data;
+    const tombs = { ...state.deleted };
+    for (const [id, at] of Object.entries(data.deleted || {})) tombs[id] = Math.max(tombs[id] || 0, at);
+    state = { ...data, deleted: tombs };
     fmtCache.clear();
     lastBarWidth.clear();
     applyTheme();
@@ -1353,9 +1582,6 @@ document.addEventListener('click', (ev) => {
       ui.tableView[arg] = !ui.tableView[arg];
       render();
       break;
-    case 'add-menu':
-      addMenuSheet();
-      break;
     case 'add-entry':
       if (btn.dataset.replace) sheetStack.pop();
       entrySheet();
@@ -1370,18 +1596,28 @@ document.addEventListener('click', (ev) => {
         commit('Saving deleted');
       }
       break;
-    case 'edit-goal':
-      if (btn.dataset.replace) sheetStack.pop();
+    case 'new-goal':
       goalSheet();
       break;
-    case 'delete-goal':
-      if (confirm('Remove your savings goal?\n\nYour savings stay — only the goal is removed.')) {
-        state.goal = null;
-        lastBarWidth.delete('goal');
-        closeSheet();
-        commit('Goal removed');
-      }
+    case 'edit-goal':
+      goalSheet(id);
       break;
+    case 'delete-goal': {
+      const g = findGoal(id);
+      if (!g || !confirm(`Delete the goal “${goalName(g)}”?\n\nYour savings stay — they just won't count toward a goal any more.`)) break;
+      state.goals = state.goals.filter((x) => x.id !== id);
+      lastBarWidth.delete(`goal-${id}`);
+      let message = 'Goal deleted';
+      if (state.settings.defaultGoalId === id) {
+        // Keep auto-linking working: the next goal (soonest date) takes over.
+        const next = [...state.goals].sort((a, b) => (a.dueDate < b.dueDate ? -1 : 1))[0];
+        state.settings.defaultGoalId = next ? next.id : null;
+        if (next) message = `Goal deleted — new savings now go to ${goalName(next)}`;
+      }
+      closeSheet();
+      commit(message);
+      break;
+    }
     case 'add-debt':
       if (btn.dataset.replace) sheetStack.pop();
       debtSheet(null, ui.debtDirection);
@@ -1448,16 +1684,35 @@ document.addEventListener('click', (ev) => {
       exportCSV();
       break;
     case 'load-sample':
-      state = sampleState(state.settings.currency);
+      state = { ...sampleState(state.settings.currency), deleted: state.deleted };
       lastBarWidth.clear();
       commit('Sample data added — erase it any time in Settings');
       break;
     case 'erase':
-      if (confirm('Erase all your savings, debts and your goal on this device?\n\nThis cannot be undone. Save a backup first if you might need it.')) {
-        state = { ...state, entries: [], debts: [], goal: null };
+      if (confirm(sync.isOn()
+        ? 'Erase all your savings, debts and goals?\n\nThis also erases them on your other devices that use GitHub sync. Older copies stay in your GitHub history.'
+        : 'Erase all your savings, debts and goals on this device?\n\nThis cannot be undone. Save a backup first if you might need it.')) {
+        state = { ...state, entries: [], debts: [], goals: [], settings: { ...state.settings, defaultGoalId: null } };
         lastBarWidth.clear();
         commit('All data erased');
       }
+      break;
+    case 'sync-now':
+      sync.now().then(() => {
+        if (sync.status.kind === 'ok') toast('Synced with GitHub');
+      });
+      break;
+    case 'sync-off':
+      if (confirm('Turn off GitHub sync on this device?\n\nYour data stays here and in GitHub. Other devices keep syncing.')) {
+        sync.disconnect();
+        render();
+        toast('Sync turned off on this device');
+      }
+      break;
+    case 'sync-later':
+      syncLater.until = Date.now() + 3 * 86400000;
+      try { localStorage.setItem('moneytrack.syncLater', String(syncLater.until)); } catch { /* ignore */ }
+      render();
       break;
     case 'enable-badge':
       if ('Notification' in window) {
@@ -1490,6 +1745,51 @@ document.addEventListener('change', (ev) => {
   }
 });
 
+// Connect to GitHub (Settings → GitHub sync).
+document.addEventListener('submit', async (ev) => {
+  if (ev.target.id !== 'syncForm') return;
+  ev.preventDefault();
+  const form = ev.target;
+  const err = $('#syncError');
+  const button = $('#syncConnect');
+  const fail = (message) => {
+    err.textContent = message;
+    err.hidden = false;
+  };
+  err.hidden = true;
+  const token = form.token.value.trim();
+  const where = parseRepo(form.repo.value);
+  if (!where) return fail('Type the repository as owner/name, e.g. your-name/money-tracker-data.');
+  if (!token) return fail('Paste your access key first.');
+  if (/\s/.test(token) || token.length < 20) return fail("That doesn't look like a GitHub key. It's one long line starting with github_pat_.");
+  button.disabled = true;
+  button.textContent = 'Connecting…';
+  try {
+    // Sample data is only for trying the app out — never upload it.
+    const real = {
+      ...state,
+      entries: state.entries.filter((e) => !e.sample),
+      debts: state.debts.filter((d) => !d.sample),
+      goals: state.goals.filter((g) => !g.sample),
+    };
+    if (real.entries.length !== state.entries.length || real.debts.length !== state.debts.length || real.goals.length !== state.goals.length) {
+      const settings = { ...state.settings };
+      if (!real.goals.some((g) => g.id === settings.defaultGoalId)) settings.defaultGoalId = null;
+      state = { ...emptyState(), ...real, deleted: state.deleted, settings };
+      saveState(state);
+      lastSnapshot = snapshot(state);
+    }
+    await sync.connect({ token, owner: where.owner, repo: where.repo });
+    form.token.value = '';
+    render();
+    toast('GitHub sync is on');
+  } catch (e) {
+    fail(e && e.message ? e.message : 'Could not connect. Check the key and try again.');
+    button.disabled = false;
+    button.innerHTML = `${ICON.cloud}${sync.isOn() ? 'Save new key' : 'Connect'}`;
+  }
+});
+
 // <details> "toggle" doesn't bubble, so listen in the capture phase.
 document.addEventListener('toggle', (ev) => {
   if (ev.target.id === 'settledList') ui.showSettled = ev.target.open;
@@ -1510,16 +1810,28 @@ window.addEventListener('hashchange', () => {
 window.addEventListener('storage', (ev) => {
   if (ev.key === STORAGE_KEY) {
     state = loadState();
+    lastSnapshot = snapshot(state);
     fmtCache.clear();
     applyTheme();
     render();
   }
 });
 
-// Coming back to the app (maybe on a new day) — refresh dates and alerts.
+// Coming back to the app (maybe on a new day) — refresh dates and alerts, and fetch changes from other devices.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') render();
+  if (document.visibilityState === 'visible') {
+    render();
+    sync.now();
+  } else if (sync.hasPending()) {
+    sync.now(); // leaving the app — upload the last change right away
+  }
 });
+window.addEventListener('online', () => sync.now());
+window.addEventListener('pagehide', () => { if (sync.hasPending()) sync.now(); });
+setInterval(() => {
+  if (document.visibilityState === 'visible' && sync.isOn()) sync.now();
+}, 120000);
+setInterval(updateSyncBits, 30000); // keeps "2 min ago" fresh
 
 let lastWidth = window.innerWidth;
 let resizeTimer;
@@ -1545,6 +1857,7 @@ document.addEventListener('pointerdown', (ev) => {
 if (location.hash === '#activity') history.replaceState(history.state, '', '#savings');
 applyTheme();
 render();
+sync.now();
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   window.addEventListener('load', () => {
