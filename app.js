@@ -1956,8 +1956,12 @@ document.addEventListener('submit', async (ev) => {
       goals: state.goals.filter((g) => !g.sample),
     };
     if (real.entries.length !== state.entries.length || real.debts.length !== state.debts.length || real.goals.length !== state.goals.length) {
-      const settings = { ...state.settings };
-      if (!real.goals.some((g) => g.id === settings.defaultGoalId)) settings.defaultGoalId = null;
+      // The auto goal only came from the sample: reset it with a "never changed" stamp so your real choice wins.
+      const settings = { ...state.settings, stamps: { ...state.settings.stamps } };
+      if (!real.goals.some((g) => g.id === settings.defaultGoalId)) {
+        settings.defaultGoalId = null;
+        settings.stamps.defaultGoalId = 0;
+      }
       state = { ...emptyState(), ...real, deleted: state.deleted, settings };
       saveState(state);
       lastSnapshot = snapshot(state);

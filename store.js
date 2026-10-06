@@ -1,7 +1,7 @@
 // Data, saving, and small helpers. Everything is stored in this browser (localStorage).
 
 export const STORAGE_KEY = 'moneytrack.v1';
-export const APP_VERSION = '1.3.0';
+export const APP_VERSION = '1.3.1';
 
 export const CATEGORIES = [
   { id: 'food', name: 'Food & Drink', emoji: '🍔' },
